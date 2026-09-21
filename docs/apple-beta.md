@@ -198,6 +198,11 @@ launched command-line client's access. Use the Developer ID path instead.
 
 ## Direct Mac: Developer ID, notarization, and a stapled ZIP
 
+The **DMG is the recommended tester download**: it shows Hozz alongside an
+Applications shortcut in a large-icon Finder window. Drag the app to
+Applications, eject the disk image, then launch the installed app. The signed
+app ZIP remains an alternative and the input to the DMG packaging step below.
+
 Required: the existing **Developer ID Application certificate/private key**
 for `HOZZ_TEAM`, plus a Developer ID provisioning profile matching
 `com.thatcube.Hozz.mac` and its existing shared-Keychain entitlements. A local
@@ -250,6 +255,51 @@ submission ID and inspect it with authorized `notarytool info` under the build
 lease before retrying. An accepted submission with a stapling or Gatekeeper
 failure is **not a completed deliverable**. No upload to a download host, app
 launch, or tester distribution occurs in this lane.
+
+### Make the recommended drag-to-Applications DMG
+
+Repackage the **existing notarized ZIP**, without rebuilding or re-signing its
+app. This keeps the binary and its source provenance identical to the ZIP beta.
+Install the pinned Finder-layout dependencies in an isolated environment once:
+
+```bash
+python3 -m venv build/dmg-tools-venv
+build/dmg-tools-venv/bin/python -m pip install -r tools/requirements-dmg.txt
+export HOZZ_DMG_PYTHON="$PWD/build/dmg-tools-venv/bin/python"
+
+# Set HOZZ_TEAM and the previously authorized notary credentials as above.
+# Packaging source must be committed and clean before signing/submitting.
+tools/mac-dmg.sh \
+  --release-evidence build/apple-beta/YOUR-NOTARIZED-MAC-LANE/evidence.json \
+  --source-commit "$(git rev-parse HEAD)" --confirm-notarize
+```
+
+The lane holds the same shared Apple build lease from extraction through
+notarization, stapling, and read-only mount verification. It checks the input
+ZIP's recorded SHA-256, source commit, signing identity, app metadata and
+notarization ticket before packaging. It uses the app's existing icon and a
+fixed Finder icon layout; no Finder automation, installer scripts, administrator
+prompts, or new artwork are involved.
+
+The resulting DMG contains `Hozz.app`, an `Applications` shortcut, and short
+installation instructions. The image is Developer ID-signed, independently
+notarized, stapled, and Gatekeeper-assessed. Verification mounts only that image
+at a unique private path, checks the layout, copies the app to private test
+storage, compares app contents/modes/symlinks, and rechecks the copied app's
+signature and ticket. It always attempts to unmount its own verification
+volume, including on a failed check. It never installs in `/Applications` or
+launches Hozz.
+
+Outputs and evidence remain under `build/mac-dmg/`. `evidence.json` records
+**both** the original application's commit and the packaging-tool commit,
+plus input ZIP and final DMG hashes. Only a successful `distributable: true`
+image is ready for a separately approved release upload. Retain the ZIP,
+archive, dSYMs, and submission logs; do not move the existing release tag to
+pretend the unchanged application was rebuilt.
+
+```bash
+python3 -m unittest tools.tests.test_mac_dmg
+```
 
 ## Explicit upload; no tester distribution
 

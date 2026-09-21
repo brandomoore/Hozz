@@ -61,6 +61,8 @@ holds it through the complete lane:
   source-write lane;
 - `tools/apple-beta.sh` for the beta build/archive/export lane, including any
   explicitly requested upload, notarization, and processing wait;
+- `tools/mac-dmg.sh` for repackaging an existing notarized app through DMG
+  signing, notarization, mounting, and copy verification;
 - `tools/with-apple-build-lease.sh` for unusual direct commands.
 
 Nested scripts validate and reuse the inherited descriptor-backed lease instead

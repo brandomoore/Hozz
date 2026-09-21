@@ -17,9 +17,11 @@ TestFlight release.
   export on an Apple device and choose that file on Android.
 - **iPhone/iPad:** follow the TestFlight invitation when available.
   Requires iOS/iPadOS 17+.
-- **Mac:** use the signed, notarized download when available. Requires macOS
-  14+. Do not bypass an operating-system untrusted-software warning to run an
-  unsigned development artifact.
+- **Mac:** download the signed, notarized **DMG**. Open it, drag **Hozz** onto
+  **Applications**, eject the disk image, then open Hozz from Applications.
+  Requires macOS 14+. Quit an existing Hozz instance before replacing the app;
+  do not delete its stored health archive. The ZIP remains an alternative.
+  Do not bypass an operating-system untrusted-software warning.
 
 ## Start without personal data
 

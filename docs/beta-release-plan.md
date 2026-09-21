@@ -12,7 +12,7 @@ download available.
 | --- | --- |
 | Candidate integration | Reviewed archive implementation and current build safeguards coexist on one commit. |
 | Android distribution | A non-debuggable, consistently signed preview APK; version, source commit, checksum, and installation instructions accompany it. |
-| Apple distribution | Reproducible iPhone/iPad TestFlight archives and a signed, notarized direct-download Mac beta; the release lane retains the Apple build lease throughout archive, export, and processing. |
+| Apple distribution | Reproducible iPhone/iPad TestFlight archives and a signed, notarized drag-to-Applications Mac DMG (ZIP alternative); the release lane retains the Apple build lease throughout archive, export, and processing. |
 | Transfer acceptance | Synthetic archives import, retry without duplication, retain unsupported records and deletions, and re-export without losing canonical data. No real health records are test fixtures. |
 | Regression checks | Generated contracts, Python and Android tests, repeated Apple tests, and device-architecture builds pass on the integrated candidate. Expected skips are disclosed. |
 | Tester guidance | Explain setup, supported formats, known limits, data privacy, and how to report a problem without posting health data. |

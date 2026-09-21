@@ -36,6 +36,7 @@ jobs:
       - name: Check release-tool guards without signing or network access
         run: |
           python3 -m unittest discover -s tools/tests -p 'test_apple_*.py'
+          python3 -m unittest tools.tests.test_mac_dmg
           python3 tools/android-beta-test.py
           python3 tools/android-beta-icon.py --check
 
