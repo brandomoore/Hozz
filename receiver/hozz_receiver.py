@@ -893,12 +893,23 @@ def epoch_milliseconds(value):
     if not isinstance(value, str):
         return 0
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = parse_instant_datetime(value)
     except ValueError:
         return 0
     if parsed.tzinfo is None:
         return 0
     return int(parsed.timestamp() * 1_000)
+
+
+def parse_instant_datetime(value):
+    # Python 3.9 only accepts 3 or 6 fractional digits. Keep the original
+    # timestamp for identity; datetime is used only for validation/epoch math.
+    normalized = re.sub(
+        r"(\d{2}:\d{2}:\d{2})\.(\d+)",
+        lambda match: match[1] + "." + match[2][:6].ljust(6, "0"),
+        value.replace("Z", "+00:00"),
+    )
+    return datetime.fromisoformat(normalized)
 
 
 def series_end_id(source_id, type_identifier):
@@ -1190,7 +1201,7 @@ def require_instant(record, field, prefix):
     if RFC3339.fullmatch(value) is None:
         raise PartialBatch(f"{prefix} has an invalid {field}")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = parse_instant_datetime(value)
     except ValueError as error:
         raise PartialBatch(f"{prefix} has an invalid {field}") from error
     if "T" not in value or parsed.tzinfo is None:
@@ -4211,6 +4222,15 @@ def open_hashed_file(
             yield None, stream, snapshot, key, key[len("file:v3:"):]
 
 
+class SeekableSpooledSnapshot(tempfile.SpooledTemporaryFile):
+    """Supply the seekable API missing from Python 3.9/3.10 spooled files."""
+
+    def seekable(self):
+        if self.closed:
+            raise ValueError("I/O operation on closed snapshot")
+        return True
+
+
 @contextmanager
 def captured_file_snapshot(
     source,
@@ -4218,7 +4238,7 @@ def captured_file_snapshot(
     spool_directory,
     expected_digest=None,
 ):
-    with tempfile.SpooledTemporaryFile(
+    with SeekableSpooledSnapshot(
         max_size=MAX_SNAPSHOT_MEMORY_BYTES,
         mode="w+b",
         dir=spool_directory,

@@ -52,12 +52,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          accept-android-sdk-licenses: false
+          packages: platforms;android-37.0 build-tools;36.0.0 platform-tools
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-provider: basic
           cache-cleanup: never
-      - name: Install compile SDK
-        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
       - name: Unit tests, lint, and unsigned release compilation
         working-directory: Android
         run: >-

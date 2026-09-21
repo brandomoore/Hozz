@@ -33,6 +33,44 @@ from receiver.hozz_receiver import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class LegacyRuntimeCompatibilityTests(unittest.TestCase):
+    def test_snapshot_supports_zip_before_and_after_disk_rollover(self):
+        for memory_limit in (1, 256 * 1024):
+            with self.subTest(memory_limit=memory_limit):
+                with receiver.SeekableSpooledSnapshot(
+                    max_size=memory_limit, mode="w+b",
+                ) as snapshot:
+                    self.assertTrue(snapshot.seekable())
+                    with zipfile.ZipFile(snapshot, "w") as archive:
+                        archive.writestr("fixture.ndjson", b'{"synthetic":true}\n')
+                    snapshot.seek(0)
+                    with zipfile.ZipFile(snapshot) as archive:
+                        self.assertEqual(
+                            archive.read("fixture.ndjson"),
+                            b'{"synthetic":true}\n',
+                        )
+                with self.assertRaises(ValueError):
+                    snapshot.seekable()
+
+    def test_arbitrary_fractional_precision_validates_without_identity_loss(self):
+        base = receiver.epoch_milliseconds("2026-01-01T00:00:00Z")
+        for digits in ("1", "12", "123", "1234", "123456", "123456789"):
+            with self.subTest(digits=digits):
+                value = f"2026-01-01T00:00:00.{digits}Z"
+                self.assertEqual(
+                    receiver.require_instant({"date": value}, "date", "fixture"),
+                    value,
+                )
+                self.assertEqual(
+                    receiver.epoch_milliseconds(value),
+                    base + int(digits[:3].ljust(3, "0")),
+                )
+        self.assertNotEqual(
+            receiver.compatible_normalized_timestamp("2026-01-01T00:00:00.0001Z"),
+            receiver.compatible_normalized_timestamp("2026-01-01T00:00:00.0009Z"),
+        )
+
+
 class CanonicalIdentityTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -852,10 +890,10 @@ class MigrationTests(unittest.TestCase):
             legacy_unique_date = "2026-01-03T00:00:00.0001Z"
             ambiguous_date = "2026-01-03T00:00:01.0001Z"
             self.assertEqual(
-                int(datetime.fromisoformat(
+                int(receiver.parse_instant_datetime(
                     stable_unique_date.replace("Z", "+00:00")
                 ).timestamp() * 1_000),
-                int(datetime.fromisoformat(
+                int(receiver.parse_instant_datetime(
                     legacy_unique_date.replace("Z", "+00:00")
                 ).timestamp() * 1_000),
             )
@@ -973,10 +1011,10 @@ class MigrationTests(unittest.TestCase):
                     """,
                     (
                         record_type,
-                        int(datetime.fromisoformat(
+                        int(receiver.parse_instant_datetime(
                             start.replace("Z", "+00:00")
                         ).timestamp() * 1_000),
-                        int(datetime.fromisoformat(
+                        int(receiver.parse_instant_datetime(
                             end.replace("Z", "+00:00")
                         ).timestamp() * 1_000),
                         value,
