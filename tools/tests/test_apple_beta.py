@@ -21,6 +21,19 @@ spec.loader.exec_module(beta)
 
 
 class AppleBetaTests(unittest.TestCase):
+    def test_healthkit_purpose_strings_are_required_before_submission(self):
+        valid = {
+            "NSHealthShareUsageDescription": "Read selected Health data for export.",
+            "NSHealthUpdateUsageDescription": "Hozz does not write to Apple Health.",
+        }
+        beta.validate_health_purpose_strings(valid)
+        for key in valid:
+            for value in (None, "", "  ", 1):
+                with self.subTest(key=key, value=value):
+                    info = dict(valid, **{key: value})
+                    with self.assertRaisesRegex(ValueError, key):
+                        beta.validate_health_purpose_strings(info)
+
     def args(self, action="build", platform="ios", *extra):
         source = ["--source-commit", "a" * 40] if action in ("upload", "notarize") else []
         return beta.arguments([action, platform, "--version", "0.1.0", "--build", "42", *source, *extra])

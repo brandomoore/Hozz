@@ -249,6 +249,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         ITSAppUsesNonExemptEncryption: false
         NSHealthShareUsageDescription: Hozz reads the Health data you select so you can export it to destinations you own.
+        NSHealthUpdateUsageDescription: Hozz does not write to Apple Health. It reads the Health data you choose so you can export it to destinations you own.
         # Read at a sensitive moment, so it says what happens and nothing more.
         NSHealthClinicalHealthRecordsShareUsageDescription: Hozz exports the health records you choose to destinations you own. Nothing is uploaded to Hozz, and nobody but you receives them.
         # Required before Hozz may look for a receiver on the local network.

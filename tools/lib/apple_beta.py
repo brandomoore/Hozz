@@ -321,11 +321,20 @@ def validate_entitlements(entitlements, platform, widget=False, source=False):
         raise ValueError("Missing shared Hozz Keychain access group.")
 
 
+def validate_health_purpose_strings(info):
+    for key in ("NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"):
+        value = info.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"iOS artifact is missing required HealthKit purpose string: {key}")
+
+
 def validate_artifact(app, args, directory, env, exported=False):
     mac = args.platform == "mac"
     resources = app / "Contents/Resources" if mac else app
     info = read_plist(app / "Contents/Info.plist" if mac else app / "Info.plist")
     check_metadata(info, PLATFORMS[args.platform][3], args)
+    if not mac:
+        validate_health_purpose_strings(info)
     if not mac and info.get("UIDeviceFamily") != [1, 2]:
         raise ValueError("iOS artifact must support both iPhone and iPad.")
     if info.get("ITSAppUsesNonExemptEncryption") is not False:

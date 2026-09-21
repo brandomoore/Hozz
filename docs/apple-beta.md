@@ -95,6 +95,11 @@ Identifier Prefix different from their Team ID. Register/configure capabilities
 in the developer account deliberately, rather than changing bundle IDs to get
 past an error. Clinical Health Records stay disabled in this lane.
 
+Apple's upload validation requires both HealthKit read and update purpose
+strings even though Hozz requests no Apple Health write access. The update
+string states that read-only behavior truthfully; the packaging validator
+rejects either missing string before submission.
+
 TestFlight on either platform requires a usable **Apple Distribution certificate and its
 private key** in the local keychain. Mac TestFlight also requires **Mac Installer
 Distribution** (shown by Keychain as `3rd Party Mac Developer Installer`).
