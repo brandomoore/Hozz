@@ -1,0 +1,67 @@
+name: Beta checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - thatcube-hozz-durable-export
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  archive-contract:
+    name: Archive contract / Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Check generated contracts
+        run: python3 tools/generate-shared-contracts.py --check
+      - name: Run receiver and synthetic fixture regressions
+        run: python3 -m unittest receiver.test_hozz_receiver tools.tests.test_beta_demo
+      - name: Check release-tool guards without signing or network access
+        run: |
+          python3 -m unittest discover -s tools/tests -p 'test_apple_*.py'
+          python3 tools/android-beta-test.py
+          python3 tools/android-beta-icon.py --check
+
+  android:
+    name: Android / unit, lint, unsigned release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-provider: basic
+          cache-cleanup: never
+      - name: Install compile SDK
+        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
+      - name: Unit tests, lint, and unsigned release compilation
+        working-directory: Android
+        run: >-
+          ./gradlew --no-daemon --no-parallel --max-workers=1
+          -Dorg.gradle.jvmargs="-Xmx2g -Dfile.encoding=UTF-8"
+          -Pkotlin.compiler.execution.strategy=in-process
+          testDebugUnitTest lintRelease assembleRelease

@@ -247,6 +247,16 @@ final class HealthKitBridgeTests: XCTestCase {
 
         XCTAssertEqual(object["count"] as? Int, 300)
         XCTAssertEqual(
+            (object["canonical"] as? [String: Any])?["value"] as? Double,
+            142
+        )
+        XCTAssertEqual(
+            (object["original"] as? [String: Any])?["description"] as? String,
+            "142 count/min"
+        )
+        XCTAssertNil((object["original"] as? [String: Any])?["unit"])
+        XCTAssertNil((object["original"] as? [String: Any])?["value"])
+        XCTAssertEqual(
             object["aggregatesSeries"] as? Bool,
             true,
             "One number standing for three hundred must not read as a single measurement."
@@ -280,8 +290,117 @@ final class HealthKitBridgeTests: XCTestCase {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
+        let failureID = HealthSampleEncoder.encodingFailureID(
+            sourceRecordID: id,
+            typeIdentifier: "HKQuantityTypeIdentifierStepCount"
+        )
 
         XCTAssertEqual(object["kind"] as? String, "sampleEncodingError")
-        XCTAssertEqual(object["id"] as? String, id.uuidString.lowercased())
+        XCTAssertEqual(
+            object["id"] as? String,
+            failureID.uuidString.lowercased()
+        )
+        XCTAssertEqual(
+            object["canonicalId"] as? String,
+            "apple.healthkit:\(failureID.uuidString.lowercased())"
+        )
+        XCTAssertEqual(
+            object["parentCanonicalId"] as? String,
+            "apple.healthkit:\(id.uuidString.lowercased())"
+        )
+        XCTAssertEqual(object["recordVersion"] as? Int, 1)
+    }
+
+    func testSuccessAndDeletionResolveTheSameEncodingFailureParent() throws {
+        let type = HKQuantityType(.stepCount)
+        let sample = HKQuantitySample(
+            type: type,
+            quantity: HKQuantity(unit: .count(), doubleValue: 1),
+            start: Date(timeIntervalSince1970: 1),
+            end: Date(timeIntervalSince1970: 2)
+        )
+        let encoder = HealthSampleEncoder()
+        let entry = try XCTUnwrap(
+            HealthTypeCatalog.entriesByIdentifier[type.identifier]
+        )
+        let success = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: encoder.encode(sample: sample, catalogEntry: entry)
+            ) as? [String: Any]
+        )
+        let failure = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: encoder.encodeEncodingFailure(
+                    id: sample.uuid,
+                    typeIdentifier: type.identifier,
+                    message: "fixture"
+                )
+            ) as? [String: Any]
+        )
+        let deletion = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: encoder.encodeDeletion(
+                    id: sample.uuid,
+                    typeIdentifier: type.identifier
+                )
+            ) as? [String: Any]
+        )
+
+        XCTAssertNotEqual(
+            failure["canonicalId"] as? String,
+            success["canonicalId"] as? String
+        )
+        XCTAssertEqual(
+            failure["parentCanonicalId"] as? String,
+            success["canonicalId"] as? String
+        )
+        XCTAssertEqual(
+            deletion["canonicalId"] as? String,
+            success["canonicalId"] as? String
+        )
+    }
+
+    func testContinuationFailureNamesItsExplicitEndMarker() throws {
+        let sampleID = UUID()
+        let shape = SeriesShape(
+            typeIdentifier: "HKWorkoutRouteTypeIdentifier",
+            headerKind: "workoutRoute",
+            elementKind: "workoutRouteLocations",
+            endKind: "workoutRouteEnd",
+            elementsKey: "locations",
+            elementsPerRecord: 500,
+            recordsPerPage: 8
+        )
+        let resolution = SeriesEncoding.completionCanonicalID(
+            shape: shape,
+            sample: sampleID
+        )
+        let data = try HealthSampleEncoder().encodeEncodingFailure(
+            id: sampleID,
+            typeIdentifier: shape.typeIdentifier,
+            message: "continuation failed",
+            resolutionCanonicalID: resolution
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let recordID = try XCTUnwrap(object["id"] as? String)
+
+        XCTAssertEqual(
+            object["canonicalId"] as? String,
+            HozzArchiveContract.canonicalID(
+                store: "apple.healthkit",
+                id: recordID
+            )
+        )
+        XCTAssertEqual(
+            object["parentCanonicalId"] as? String,
+            HozzArchiveContract.canonicalID(
+                store: "apple.healthkit",
+                id: sampleID.uuidString.lowercased()
+            )
+        )
+        XCTAssertEqual(object["resolutionCanonicalId"] as? String, resolution)
+        XCTAssertEqual(object["recordVersion"] as? Int, 3)
     }
 }

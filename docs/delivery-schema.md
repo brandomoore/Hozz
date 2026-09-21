@@ -33,8 +33,13 @@ read as something it is not, and a receiver comparing an old batch with a new on
 can tell that the meaning of a column changed rather than having to infer it from
 the numbers.
 
-**Identifiers** are lowercase UUID strings. A sample keeps the UUID HealthKit
-gave it, so the same record delivered twice is recognisably the same record.
+**Source identifiers** are normally lowercase HealthKit UUID strings.
+`canonicalId` is exactly `sourceRecord.store + ":" + id`; receivers reject a
+record that tries to substitute another canonical identity. Parented series
+records bind `parentCanonicalId` to `sourceRecord.store + ":" +
+sourceRecord.id`. This namespaces identity for cross-platform merge and projection;
+synthetic detail/error records have their own deterministic ID and retain the
+source record under `sourceRecord`.
 
 **Nothing is null.** A field Hozz has no value for is absent rather than present
 and empty. An absent `device` means HealthKit reported no device, not that Hozz
@@ -49,14 +54,19 @@ protocol are projections of it. Every record has these fields:
 | --- | --- | --- |
 | `schemaVersion` | Integer | Currently `1`. |
 | `catalogVersion` | Integer | Version of Hozz's Health type catalogue. |
-| `id` | String | Lowercase UUID. Stable across redeliveries. |
-| `type` | String | HealthKit type identifier, e.g. `HKQuantityTypeIdentifierHeartRate`. |
+| `canonicalId` | String | Stable Hozz identity across imports and projection retries. |
+| `canonicalType` | String | Source-neutral Hozz type, e.g. `vitals.heart-rate`. |
+| `recordVersion` | Integer | Monotonic Hozz version. Higher versions replace lower ones. |
+| `id` | String | Original or deterministic record identifier. |
+| `type` | String | Original platform type identifier, e.g. `HKQuantityTypeIdentifierHeartRate`. |
 | `kind` | String | See below. |
 | `startDate` | String | ISO 8601 UTC. |
 | `endDate` | String | ISO 8601 UTC. Equals `startDate` for instantaneous samples. |
 | `source` | Object | Where the sample came from. |
 | `device` | Object | Optional. The hardware, when HealthKit named one. |
 | `metadata` | Object | Optional. HealthKit metadata, type-tagged. |
+| `sourceRecord` | Object | Original store, record ID/type, and source version when that platform exposes one. |
+| `lineage` | Array | Stores/adapters this record has traversed. |
 
 ### `kind`
 
@@ -69,8 +79,8 @@ protocol are projections of it. Every record has these fields:
 | `workoutRoute` | `workout` | A GPS route's own record. |
 | `workoutRouteLocations` | `route`, `sequence`, `offset`, `count`, `locations` | One page of route points. |
 | `workoutRouteEnd` | `route`, `locations` | Marks a route as completely written. |
-| `deletion` | — | A tombstone. Carries only `kind`, `id`, `type`, `schemaVersion`. |
-| `sampleEncodingError` | `message` | A sample Hozz could not encode, written in its place so the batch never silently omits it. |
+| `deletion` | — | A versioned tombstone with the same canonical identity as the removed record. |
+| `sampleEncodingError` | `message`, optional `resolutionCanonicalId` | A sample Hozz could not encode, written in its place so the batch never silently omits it. A continuation failure resolves only when its deterministic end marker arrives or its parent is deleted. |
 | `sample` | — | An `HKSample` subclass this build has no specific handling for. |
 | `typeCoverage` | `state`, `complete`, `deliveredCount`, `primedFrom`, `primedThrough`, `observedAt` | Not a measurement: how completely Hozz has read one type. See below. |
 
@@ -229,6 +239,7 @@ describes a type rather than a moment.
 ```json
 {
   "kind": "typeCoverage",
+  "schemaVersion": 1,
   "type": "HKQuantityTypeIdentifierStepCount",
   "state": "anchorClosed",
   "complete": true,
@@ -283,10 +294,13 @@ a row of blanks or as a metric named after a type.
 
 ## NDJSON
 Default. One record per line, `\n` terminated, `application/x-ndjson`. Lossless.
+ZIP exports also carry `hozz-manifest.json`, which declares schema v1 and the
+NDJSON member name. Raw NDJSON and older one-member ZIPs remain legacy inputs;
+sidecar-declared v1 records are validated strictly.
 
 ```
-{"catalogVersion":6,"endDate":"2026-08-22T21:10:46.500Z","id":"2f1a…","kind":"quantity","metadata":{},"quantity":{"description":"62.5 count/min","unit":"count/min","value":62.5},"schemaVersion":1,"source":{"bundleIdentifier":"com.apple.health.ABC","name":"Apple Watch","operatingSystem":{"major":26,"minor":5,"patch":0}},"startDate":"2026-08-22T21:10:46.500Z","type":"HKQuantityTypeIdentifierHeartRate"}
-{"id":"9c40…","kind":"deletion","schemaVersion":1,"type":"HKQuantityTypeIdentifierStepCount"}
+{"canonicalId":"apple.healthkit:2f1a…","canonicalType":"vitals.heart-rate","catalogVersion":6,"endDate":"2026-08-22T21:10:46.500Z","id":"2f1a…","kind":"quantity","lineage":[{"recordId":"2f1a…","store":"apple.healthkit"}],"metadata":{},"quantity":{"canonical":{"unit":"count/min","value":62.5},"description":"62.5 count/min","original":{"description":"62.5 count/min"},"unit":"count/min","value":62.5},"recordVersion":1,"schemaVersion":1,"source":{"bundleIdentifier":"com.apple.health.ABC","name":"Apple Watch","operatingSystem":{"major":26,"minor":5,"patch":0}},"sourceRecord":{"id":"2f1a…","store":"apple.healthkit","type":"HKQuantityTypeIdentifierHeartRate"},"startDate":"2026-08-22T21:10:46.500Z","type":"HKQuantityTypeIdentifierHeartRate"}
+{"canonicalId":"apple.healthkit:9c40…","canonicalType":"activity.steps","id":"9c40…","kind":"deletion","lineage":[{"recordId":"9c40…","store":"apple.healthkit"}],"recordVersion":2,"schemaVersion":1,"sourceRecord":{"id":"9c40…","store":"apple.healthkit","type":"HKQuantityTypeIdentifierStepCount"},"type":"HKQuantityTypeIdentifierStepCount"}
 ```
 
 Keys within a record are sorted, so the same records always produce the same
@@ -328,6 +342,18 @@ type. Splitting it would defeat appending on the receiving end.
 Grouped by metric rather than by sample, `application/json`. What Home
 Assistant, MQTT subscribers, and most dashboards want. **Lossy**: metadata,
 device, and workout detail are dropped.
+
+An explicit `sampleEncodingError` has no numeric point to publish, so Metrics
+JSON omits it rather than inventing a value. Hozz records that omission
+durably with the destination cursor. If the same destination is later changed
+to NDJSON or JSON, its sweep and recent-history prime replay so the lossless
+format receives the error record and every other record that was passed under
+the narrower format. Destination settings carry a persisted revision; a sync
+that started under an older format cannot commit its cursor after that edit.
+The element pages and end markers that expand high-frequency series are treated
+the same way: Metrics JSON and line protocol omit those detail records, seal
+that omission with the cursor, and replay them if the destination later becomes
+lossless.
 
 ```json
 {
@@ -384,7 +410,7 @@ device, and workout detail are dropped.
 | `metrics[].name` | String | Short snake_case name — see [metric names](#metric-names). |
 | `metrics[].units` | String | HealthKit's unit string, or `count` when the type has none. |
 | `metrics[].data[].date` | String | ISO 8601 UTC. The sample's `startDate`. |
-| `metrics[].data[].qty` | Number | Absent when the record has no numeric value. |
+| `metrics[].data[].qty` | Number | Always present. Metrics JSON carries quantity and category samples; types without a defensible numeric value are not drained for this destination, so their anchors remain available if the destination is changed to a lossless format. |
 | `metrics[].data[].units` | String | Repeated per point. |
 | `metrics[].data[].source` | String | Absent when HealthKit named no source. |
 | `metrics[].data[].endDate` | String | **Present only when the sample covers an interval.** |

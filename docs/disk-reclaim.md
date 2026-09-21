@@ -59,6 +59,8 @@ holds it through the complete lane:
   build-setting lookup, and the optional launch/relaunch step;
 - `tools/generate-healthkit-catalog.py` for the complete SDK-read and generated
   source-write lane;
+- `tools/apple-beta.sh` for the beta build/archive/export lane, including any
+  explicitly requested upload, notarization, and processing wait;
 - `tools/with-apple-build-lease.sh` for unusual direct commands.
 
 Nested scripts validate and reuse the inherited descriptor-backed lease instead
@@ -71,10 +73,11 @@ inherit those descriptors because the parent remains alive and retains the
 lease for the blocking SDK lookup and subsequent generated-source write. No
 Python build wrapper uses a blanket `close_fds=False`.
 
-There is currently no Fastlane configuration or CI workflow in Hozz. If either
-is added, its outer release/build lane must acquire the same shared protocol
-before its first Apple-resource write and retain it across archive, upload,
-processing, distribution, and tagging gaps.
+The [Apple beta lane](apple-beta.md) owns the shared lease outside its Python
+worker and upload subprocesses. The hosted beta-check workflow currently runs
+Python and Android checks only. Any additional Apple CI or release entrypoint
+must acquire the same shared protocol before its first Apple-resource write and
+retain it across archive, upload, processing, distribution, and tagging gaps.
 
 ## Protocol behavior
 

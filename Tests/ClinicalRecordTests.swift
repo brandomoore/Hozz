@@ -55,6 +55,10 @@ final class ClinicalRecordTests: XCTestCase {
     /// The constraint that matters most: a binary carrying the health-records
     /// entitlement before Apple approves it is rejected outright.
     func testClinicalRecordsAreCompiledOutOfTheDefaultBuild() {
+        XCTAssertFalse(
+            ClinicalRecordsSupport.hasDeletionSafeSnapshot,
+            "Clinical export must stay unavailable until removed records produce tombstones."
+        )
         #if HOZZ_CLINICAL_RECORDS
         XCTAssertTrue(ClinicalRecordsSupport.isBuiltIn)
         #else
@@ -76,7 +80,8 @@ final class ClinicalRecordTests: XCTestCase {
         )
 
         #if HOZZ_CLINICAL_RECORDS
-        XCTAssertEqual(availability, .availableWithPermission)
+        XCTAssertEqual(availability, .snapshotReconciliationUnavailable)
+        XCTAssertFalse(availability.canRead)
         #else
         XCTAssertEqual(availability, .notInThisBuild)
         XCTAssertTrue(
@@ -281,8 +286,44 @@ final class ClinicalRecordTests: XCTestCase {
             id.uuidString.lowercased(),
             "The identity is derived; the UUID is kept only for tracing."
         )
+        XCTAssertEqual(
+            object["canonicalId"] as? String,
+            "apple.healthkit:\(object["id"] as? String ?? "")"
+        )
+        XCTAssertEqual(
+            object["canonicalType"] as? String,
+            "clinical.record"
+        )
         XCTAssertEqual(object["kind"] as? String, "clinicalRecord")
         XCTAssertEqual(object["displayName"] as? String, "Haemoglobin")
+    }
+
+    func testAStableClinicalIdentityCarriesAMonotonicObservedVersion() throws {
+        let first = ClinicalRecordFacts(
+            healthKitID: UUID(),
+            clinicalType: labResult.rawValue,
+            displayName: "Haemoglobin",
+            sourceBundleIdentifier: "com.example.hospital",
+            startDate: Date(timeIntervalSince1970: 100),
+            endDate: Date(timeIntervalSince1970: 100),
+            fhir: fhir()
+        )
+        let second = ClinicalRecordFacts(
+            healthKitID: UUID(),
+            clinicalType: labResult.rawValue,
+            displayName: "Haemoglobin",
+            sourceBundleIdentifier: "com.example.hospital",
+            startDate: Date(timeIntervalSince1970: 200),
+            endDate: Date(timeIntervalSince1970: 200),
+            fhir: fhir()
+        )
+
+        let firstObject = encode(first)
+        let secondObject = encode(second)
+
+        XCTAssertEqual(firstObject["canonicalId"] as? String, secondObject["canonicalId"] as? String)
+        XCTAssertEqual(firstObject["recordVersion"] as? Int64, 100_000)
+        XCTAssertEqual(secondObject["recordVersion"] as? Int64, 200_000)
     }
 
     func testTheSameRecordEncodesTheSameWayTwice() {

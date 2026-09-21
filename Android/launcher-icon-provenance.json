@@ -1,0 +1,15 @@
+{
+  "source": "App/Assets.xcassets/AppIcon.appiconset/icon-1024.png",
+  "sourceSha256": "b268411c9d8c6d97e032c0aab4b4f987a096301cb330b0da9ac9117f8a25b80d",
+  "generator": "tools/android-beta-icon.py",
+  "generatorSha256": "5d0fec4b67369730ce470e115f46d833085bfad3484ff24e3f1cbfb462e00653",
+  "license": "GPL-3.0-only; see repository LICENSE (Hozz contributors)",
+  "method": "Preserve original RGB pixels; separate row-uniform background; no AI generation.",
+  "foregroundInsetPercent": 18,
+  "monochromeLightPixelThreshold": 96,
+  "generatedSha256": {
+    "Android/app/src/main/res/drawable-nodpi/hozz_launcher_background.png": "228236b0e781999a22888c757be864979c2525d23fcc2fd3b08bd6b41767baf2",
+    "Android/app/src/main/res/drawable-nodpi/hozz_launcher_foreground_image.png": "a1b2d40952ae2edfdadbd8286361ca90c8b968647851f20ad167cc81d6f74d33",
+    "Android/app/src/main/res/drawable-nodpi/hozz_launcher_monochrome_image.png": "79328ccc57ac447bfc398409b8017049b12713d745b2975732ed7116ca7c2599"
+  }
+}

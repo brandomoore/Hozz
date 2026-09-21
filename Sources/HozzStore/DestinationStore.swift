@@ -1,5 +1,25 @@
 import Foundation
 
+public struct DestinationWriteResult: Equatable, Sendable {
+    public let revision: Int64
+    public let usedReplayPayload: Bool
+
+    public init(revision: Int64, usedReplayPayload: Bool) {
+        self.revision = revision
+        self.usedReplayPayload = usedReplayPayload
+    }
+}
+
+public struct DestinationPatchResult: Equatable, Sendable {
+    public let payload: Data
+    public let revision: Int64
+
+    public init(payload: Data, revision: Int64) {
+        self.payload = payload
+        self.revision = revision
+    }
+}
+
 /// A destination's delivery position and health.
 public struct DeliveryStateRecord: Equatable, Sendable {
     public let destinationID: UUID
@@ -75,34 +95,182 @@ extension HozzStore {
     public func saveDestination(
         id: UUID,
         payload: Data,
+        replayPayloadIfOmitted: Data? = nil,
+        advancingRevision: Bool = true,
+        expectedRevision: Int64? = nil,
         createdAt: Date,
         at date: Date = .now
-    ) throws {
-        try database.run(
-            """
-            INSERT INTO destination (id, payload, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                payload = excluded.payload,
-                updated_at = excluded.updated_at;
-            """,
-            [
-                .text(id.uuidString.lowercased()),
-                .text(String(decoding: payload, as: UTF8.self)),
-                .real(createdAt.timeIntervalSince1970),
-                .real(date.timeIntervalSince1970)
-            ]
-        )
+    ) throws -> DestinationWriteResult {
+        try database.transaction {
+            let identifier = id.uuidString.lowercased()
+            if let expectedRevision {
+                let actual = try destinationRevision(id: id)
+                guard actual == expectedRevision else {
+                    throw HozzStoreError.staleDestinationConfiguration(
+                        id: id,
+                        expected: expectedRevision,
+                        actual: actual
+                    )
+                }
+            }
+            let hasOmission: Bool
+            if replayPayloadIfOmitted != nil {
+                hasOmission = try database.query(
+                    """
+                    SELECT 1 FROM delivery_omission_seal
+                    WHERE destination_id = ?
+                    LIMIT 1
+                    """,
+                    [.text(identifier)],
+                    row: { _ in true }
+                ).first ?? false
+            } else {
+                hasOmission = false
+            }
+            let selectedPayload = hasOmission
+                ? replayPayloadIfOmitted ?? payload
+                : payload
+            try database.run(
+                """
+                INSERT INTO destination (
+                    id, payload, created_at, updated_at, revision
+                )
+                VALUES (?, ?, ?, ?, 1)
+                ON CONFLICT(id) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at,
+                    revision = CASE
+                        WHEN ? != 0 THEN destination.revision + 1
+                        ELSE destination.revision
+                    END;
+                """,
+                [
+                    .text(identifier),
+                    .text(String(decoding: selectedPayload, as: UTF8.self)),
+                    .real(createdAt.timeIntervalSince1970),
+                    .real(date.timeIntervalSince1970),
+                    .integer(advancingRevision ? 1 : 0)
+                ]
+            )
+            guard let revision = try destinationRevision(id: id) else {
+                throw HozzStoreError.corruptStoredValue(
+                    "destination revision vanished after save"
+                )
+            }
+            return DestinationWriteResult(
+                revision: revision,
+                usedReplayPayload: hasOmission
+            )
+        }
     }
 
-    public func destinationPayloads() throws -> [(id: UUID, payload: Data)] {
+    public func destinationPayloads() throws
+        -> [(id: UUID, payload: Data, revision: Int64)]
+    {
         try database.query(
-            "SELECT id, payload FROM destination ORDER BY created_at;"
+            "SELECT id, payload, revision FROM destination ORDER BY created_at;"
         ) { row in
             guard let id = UUID(uuidString: row.text(0)) else {
                 throw HozzStoreError.corruptStoredValue("destination id \(row.text(0))")
             }
-            return (id: id, payload: Data(row.text(1).utf8))
+            return (
+                id: id,
+                payload: Data(row.text(1).utf8),
+                revision: row.integer(2)
+            )
+        }
+    }
+
+    public func destinationRevision(id: UUID) throws -> Int64? {
+        try database.query(
+            "SELECT revision FROM destination WHERE id = ?;",
+            [.text(id.uuidString.lowercased())],
+            row: { $0.integer(0) }
+        ).first
+    }
+
+    public func validateDestinationRevision(
+        id: UUID,
+        expectedRevision: Int64
+    ) throws {
+        try requireDestinationRevision(
+            id: id,
+            expectedRevision: expectedRevision
+        )
+    }
+
+    private func requireDestinationRevision(
+        id: UUID,
+        expectedRevision: Int64
+    ) throws {
+        let actual = try destinationRevision(id: id)
+        guard actual == expectedRevision else {
+            throw HozzStoreError.staleDestinationConfiguration(
+                id: id,
+                expected: expectedRevision,
+                actual: actual
+            )
+        }
+    }
+
+    /// Applies one automatic field repair to the latest persisted payload.
+    ///
+    /// The transform runs only while the destination still has the revision
+    /// captured by the caller. Starting from the row currently on disk keeps
+    /// unrelated fields written by other automatic bookkeeping, while the
+    /// revision guard prevents an old sync from overwriting a user's newer
+    /// configuration or recreating a destination they deleted.
+    public func patchDestination(
+        id: UUID,
+        expectedRevision: Int64,
+        at date: Date = .now,
+        transform: @Sendable (Data) throws -> Data
+    ) throws -> DestinationPatchResult {
+        try database.transaction {
+            let actual = try destinationRevision(id: id)
+            guard actual == expectedRevision else {
+                throw HozzStoreError.staleDestinationConfiguration(
+                    id: id,
+                    expected: expectedRevision,
+                    actual: actual
+                )
+            }
+            guard let text = try database.query(
+                "SELECT payload FROM destination WHERE id = ?;",
+                [.text(id.uuidString.lowercased())],
+                row: { $0.text(0) }
+            ).first else {
+                throw HozzStoreError.staleDestinationConfiguration(
+                    id: id,
+                    expected: expectedRevision,
+                    actual: nil
+                )
+            }
+            let payload = try transform(Data(text.utf8))
+            try database.run(
+                """
+                UPDATE destination
+                SET payload = ?, updated_at = ?
+                WHERE id = ? AND revision = ?;
+                """,
+                [
+                    .text(String(decoding: payload, as: UTF8.self)),
+                    .real(date.timeIntervalSince1970),
+                    .text(id.uuidString.lowercased()),
+                    .integer(expectedRevision)
+                ]
+            )
+            guard database.changeCount == 1 else {
+                throw HozzStoreError.staleDestinationConfiguration(
+                    id: id,
+                    expected: expectedRevision,
+                    actual: try destinationRevision(id: id)
+                )
+            }
+            return DestinationPatchResult(
+                payload: payload,
+                revision: expectedRevision
+            )
         }
     }
 
@@ -140,39 +308,50 @@ extension HozzStore {
         )
     }
 
-    public func saveDeliveryState(_ record: DeliveryStateRecord) throws {
-        try database.run(
-            """
-            INSERT INTO delivery_state (
-                destination_id, state, last_attempt_at, last_success_at,
-                next_attempt_at, consecutive_failures, pending_batch_id,
-                next_sequence, delivered_records, detail
+    public func saveDeliveryState(
+        _ record: DeliveryStateRecord,
+        expectedDestinationRevision: Int64? = nil
+    ) throws {
+        try database.transaction {
+            if let expectedDestinationRevision {
+                try requireDestinationRevision(
+                    id: record.destinationID,
+                    expectedRevision: expectedDestinationRevision
+                )
+            }
+            try database.run(
+                """
+                INSERT INTO delivery_state (
+                    destination_id, state, last_attempt_at, last_success_at,
+                    next_attempt_at, consecutive_failures, pending_batch_id,
+                    next_sequence, delivered_records, detail
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(destination_id) DO UPDATE SET
+                    state = excluded.state,
+                    last_attempt_at = excluded.last_attempt_at,
+                    last_success_at = excluded.last_success_at,
+                    next_attempt_at = excluded.next_attempt_at,
+                    consecutive_failures = excluded.consecutive_failures,
+                    pending_batch_id = excluded.pending_batch_id,
+                    next_sequence = excluded.next_sequence,
+                    delivered_records = excluded.delivered_records,
+                    detail = excluded.detail;
+                """,
+                [
+                    .text(record.destinationID.uuidString.lowercased()),
+                    .text(record.state),
+                    record.lastAttemptAt.map { .real($0.timeIntervalSince1970) } ?? .null,
+                    record.lastSuccessAt.map { .real($0.timeIntervalSince1970) } ?? .null,
+                    record.nextAttemptAt.map { .real($0.timeIntervalSince1970) } ?? .null,
+                    .integer(Int64(record.consecutiveFailures)),
+                    record.pendingBatchID.map { .text($0.uuidString.lowercased()) } ?? .null,
+                    .integer(Int64(record.nextSequence)),
+                    .integer(Int64(record.deliveredRecords)),
+                    record.detail.map(SQLiteValue.text) ?? .null
+                ]
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(destination_id) DO UPDATE SET
-                state = excluded.state,
-                last_attempt_at = excluded.last_attempt_at,
-                last_success_at = excluded.last_success_at,
-                next_attempt_at = excluded.next_attempt_at,
-                consecutive_failures = excluded.consecutive_failures,
-                pending_batch_id = excluded.pending_batch_id,
-                next_sequence = excluded.next_sequence,
-                delivered_records = excluded.delivered_records,
-                detail = excluded.detail;
-            """,
-            [
-                .text(record.destinationID.uuidString.lowercased()),
-                .text(record.state),
-                record.lastAttemptAt.map { .real($0.timeIntervalSince1970) } ?? .null,
-                record.lastSuccessAt.map { .real($0.timeIntervalSince1970) } ?? .null,
-                record.nextAttemptAt.map { .real($0.timeIntervalSince1970) } ?? .null,
-                .integer(Int64(record.consecutiveFailures)),
-                record.pendingBatchID.map { .text($0.uuidString.lowercased()) } ?? .null,
-                .integer(Int64(record.nextSequence)),
-                .integer(Int64(record.deliveredRecords)),
-                record.detail.map(SQLiteValue.text) ?? .null
-            ]
-        )
+        }
     }
 
     // MARK: - Receipts
@@ -183,9 +362,16 @@ extension HozzStore {
     /// it is deliberately bounded rather than growing without limit.
     public func appendReceipt(
         _ receipt: DeliveryReceiptRecord,
-        keeping limit: Int = 100
+        keeping limit: Int = 100,
+        expectedDestinationRevision: Int64? = nil
     ) throws {
         try database.transaction {
+            if let expectedDestinationRevision {
+                try requireDestinationRevision(
+                    id: receipt.destinationID,
+                    expectedRevision: expectedDestinationRevision
+                )
+            }
             try database.run(
                 """
                 INSERT INTO delivery_receipt (

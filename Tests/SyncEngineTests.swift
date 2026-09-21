@@ -3,6 +3,7 @@ import HozzCore
 import HozzDeliver
 import HozzHealth
 import HozzHealthFake
+import HozzReceive
 import HozzStore
 import XCTest
 
@@ -89,10 +90,83 @@ private actor ChunkedHealthDataSource: HealthDataSource {
     }
 }
 
+/// Holds the first Health read until a test has changed the destination.
+///
+/// This makes the configuration race deterministic: the sync has already
+/// captured one revision, but cannot reach its cursor transaction until the
+/// test explicitly releases it.
+private actor GatedHealthDataSource: HealthDataSource {
+    private let type: HealthTypeKey
+    private let change: HealthChange
+    private var readStarted = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(type: HealthTypeKey, change: HealthChange) {
+        self.type = type
+        self.change = change
+    }
+
+    func waitUntilReadStarts() async {
+        guard !readStarted else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseRead() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+
+    func changes(
+        for type: HealthTypeKey,
+        after anchor: AnchorToken?,
+        limit: Int
+    ) async throws -> HealthChangeBatch {
+        guard type == self.type else {
+            return HealthChangeBatch(
+                changes: [],
+                proposedAnchor: AnchorToken(data: Data([0]))
+            )
+        }
+        if let anchor {
+            return HealthChangeBatch(changes: [], proposedAnchor: anchor)
+        }
+
+        if !readStarted {
+            readStarted = true
+            let waiters = startWaiters
+            startWaiters.removeAll()
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+        if !released {
+            await withCheckedContinuation { continuation in
+                if released {
+                    continuation.resume()
+                } else {
+                    releaseWaiter = continuation
+                }
+            }
+        }
+        return HealthChangeBatch(
+            changes: [change],
+            proposedAnchor: AnchorToken(data: Data([1]))
+        )
+    }
+}
+
 final class SyncEngineTests: XCTestCase {
     private var directory: TemporaryDirectory!
     private let steps = HealthTypeKey("HKQuantityTypeIdentifierStepCount")
     private let heart = HealthTypeKey("HKQuantityTypeIdentifierHeartRate")
+    private let audiogram = HealthTypeKey("HKDataTypeIdentifierAudiogram")
 
     override func setUpWithError() throws {
         directory = try TemporaryDirectory()
@@ -118,6 +192,76 @@ final class SyncEngineTests: XCTestCase {
         return .upsert(
             CapturedHealthObject(
                 id: UUID(),
+                type: type,
+                canonicalPayload: try! JSONSerialization.data(
+                    withJSONObject: payload,
+                    options: [.sortedKeys]
+                )
+            )
+        )
+    }
+
+    private func metricSample(
+        _ identifier: String,
+        type: HealthTypeKey,
+        value: Double
+    ) -> HealthChange {
+        let payload: [String: Any] = [
+            "kind": "quantity",
+            "id": identifier,
+            "type": type.rawValue,
+            "startDate": "2026-01-01T00:00:00.000Z",
+            "endDate": "2026-01-01T00:00:00.000Z",
+            "quantity": ["value": value, "unit": "count"]
+        ]
+        return .upsert(
+            CapturedHealthObject(
+                id: UUID(),
+                type: type,
+                canonicalPayload: try! JSONSerialization.data(
+                    withJSONObject: payload,
+                    options: [.sortedKeys]
+                )
+            )
+        )
+    }
+
+    private func encodingFailure(type: HealthTypeKey) throws -> HealthChange {
+        let sourceID = UUID()
+        return .upsert(
+            CapturedHealthObject(
+                id: sourceID,
+                type: type,
+                canonicalPayload: try HealthSampleEncoder()
+                    .encodeEncodingFailure(
+                        id: sourceID,
+                        typeIdentifier: type.rawValue,
+                        message: "The sample could not be encoded."
+                    )
+            )
+        )
+    }
+
+    private func seriesDetail(
+        _ identifier: String,
+        kind: String,
+        type: HealthTypeKey
+    ) -> HealthChange {
+        let objectID = UUID()
+        let payload: [String: Any] = [
+            "kind": kind,
+            "id": identifier,
+            "type": type.rawValue,
+            "sample": "series-parent",
+            "startDate": "2026-01-01T00:00:00.000Z",
+            "endDate": "2026-01-01T00:01:00.000Z",
+            "sequence": 0,
+            "offset": 0,
+            "count": 1
+        ]
+        return .upsert(
+            CapturedHealthObject(
+                id: objectID,
                 type: type,
                 canonicalPayload: try! JSONSerialization.data(
                     withJSONObject: payload,
@@ -342,6 +486,729 @@ final class SyncEngineTests: XCTestCase {
             heartCursor,
             "An excluded type must not have its cursor advanced."
         )
+    }
+
+    func testMetricsDestinationSkipsUnrepresentableTypeWithoutBlockingSupportedData() async throws {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        let destination = Destination(
+            name: "Metrics",
+            kind: .folder,
+            format: .metrics,
+            folderBookmark: Data("metrics".utf8)
+        )
+        try await delivery.save(destination)
+        let unsupported = HealthChange.upsert(
+            CapturedHealthObject(
+                id: UUID(),
+                type: audiogram,
+                canonicalPayload: Data(
+                    """
+                    {"kind":"audiogram","id":"hearing","type":"HKDataTypeIdentifierAudiogram",
+                     "startDate":"2026-01-01T00:00:00.000Z",
+                     "endDate":"2026-01-01T00:00:00.000Z","sensitivityPoints":[]}
+                    """.utf8
+                )
+            )
+        )
+        let source = ScriptedHealthDataSource(
+            streams: [
+                steps: [metricSample("step-1", type: steps, value: 1)],
+                audiogram: [unsupported]
+            ]
+        )
+        let engine = makeEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [audiogram, steps]
+        )
+
+        _ = try await engine.sync()
+        try await source.append(
+            metricSample("step-2", type: steps, value: 2),
+            to: steps
+        )
+        _ = try await engine.sync(
+            ignoringCadence: true,
+            now: Date(timeIntervalSinceNow: 60)
+        )
+
+        let unsupportedQueries = await source.queryCount(for: audiogram)
+        let unsupportedAnchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: audiogram
+        )
+        let payloadCount = await channel.payloads(for: destination.id).count
+        let supportedAnchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        XCTAssertEqual(unsupportedQueries, 0)
+        XCTAssertNil(unsupportedAnchor)
+        XCTAssertEqual(payloadCount, 2)
+        XCTAssertNotNil(supportedAnchor)
+    }
+
+    func testEncodingFailureDoesNotWedgeMetricsAndRemainsOwedToLosslessDestination()
+        async throws
+    {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        let metrics = Destination(
+            name: "Metrics",
+            kind: .folder,
+            format: .metrics,
+            folderBookmark: Data("metrics".utf8)
+        )
+        var compatibleMetrics = Destination(
+            name: "Compatible metrics",
+            kind: .folder,
+            format: .metrics,
+            folderBookmark: Data("compatible-metrics".utf8)
+        )
+        compatibleMetrics.payloadSchema = .healthAutoExport
+        let lossless = Destination(
+            name: "Archive",
+            kind: .folder,
+            format: .ndjson,
+            folderBookmark: Data("archive".utf8)
+        )
+        try await delivery.save(metrics)
+        try await delivery.save(compatibleMetrics)
+        try await delivery.save(lossless)
+        await channel.fail(lossless.id)
+
+        let source = ScriptedHealthDataSource(
+            streams: [
+                steps: [
+                    metricSample("valid-step", type: steps, value: 12),
+                    try encodingFailure(type: steps)
+                ]
+            ]
+        )
+        let engine = makeEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps]
+        )
+
+        let first = try await engine.sync()
+
+        XCTAssertEqual(first.deliveredRecords, 2)
+        for destination in [metrics, compatibleMetrics] {
+            let payloads = await channel.payloads(for: destination.id)
+            let payload = try XCTUnwrap(payloads.first)
+            let roundTrip = try BatchParser.parse(payload)
+            XCTAssertEqual(roundTrip.records.map(\.id), ["valid-step"])
+            XCTAssertFalse(
+                String(decoding: payload, as: UTF8.self)
+                    .contains("sampleEncodingError")
+            )
+        }
+        let metricsAnchor = try await store.committedAnchor(
+            scope: .destination(metrics.id),
+            type: steps
+        )
+        let compatibleMetricsAnchor = try await store.committedAnchor(
+            scope: .destination(compatibleMetrics.id),
+            type: steps
+        )
+        let losslessAnchorBeforeRetry = try await store.committedAnchor(
+            scope: .destination(lossless.id),
+            type: steps
+        )
+        XCTAssertNotNil(
+            metricsAnchor,
+            "The intentionally omitted error must not hold valid metrics behind it."
+        )
+        XCTAssertNotNil(compatibleMetricsAnchor)
+        XCTAssertNil(
+            losslessAnchorBeforeRetry,
+            "A failed lossless delivery must keep every source record owed."
+        )
+
+        await channel.recover(lossless.id)
+        let second = try await engine.sync(
+            ignoringCadence: true,
+            now: Date(timeIntervalSinceNow: 60)
+        )
+        XCTAssertEqual(second.deliveredRecords, 2)
+        let losslessPayloads = await channel.payloads(for: lossless.id)
+        let losslessText = String(
+            decoding: try XCTUnwrap(losslessPayloads.first),
+            as: UTF8.self
+        )
+        XCTAssertTrue(losslessText.contains("\"id\":\"valid-step\""))
+        XCTAssertTrue(losslessText.contains("\"kind\":\"sampleEncodingError\""))
+        let losslessAnchorAfterRetry = try await store.committedAnchor(
+            scope: .destination(lossless.id),
+            type: steps
+        )
+        XCTAssertNotNil(losslessAnchorAfterRetry)
+
+        _ = try await engine.sync(
+            ignoringCadence: true,
+            now: Date(timeIntervalSinceNow: 120)
+        )
+        let finalMetricsPayloads = await channel.payloads(for: metrics.id)
+        let finalCompatibleMetricsPayloads = await channel.payloads(
+            for: compatibleMetrics.id
+        )
+        let finalLosslessPayloads = await channel.payloads(for: lossless.id)
+        XCTAssertEqual(finalMetricsPayloads.count, 1)
+        XCTAssertEqual(finalCompatibleMetricsPayloads.count, 1)
+        XCTAssertEqual(finalLosslessPayloads.count, 1)
+    }
+
+    func testErrorOnlyMetricsPageReplaysAfterSameDestinationBecomesLossless()
+        async throws
+    {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        var destination = Destination(
+            name: "Metrics then archive",
+            kind: .folder,
+            format: .metrics,
+            folderBookmark: Data("metrics".utf8)
+        )
+        try await delivery.save(destination)
+        let scope = AnchorScope.destination(destination.id)
+        _ = try await store.beginPrime(
+            scope: scope,
+            type: steps,
+            windowStart: Date(timeIntervalSince1970: 1),
+            startedAt: Date(timeIntervalSince1970: 2),
+            chunkSeconds: 60
+        )
+        let source = ScriptedHealthDataSource(
+            streams: [steps: [try encodingFailure(type: steps)]]
+        )
+        let engine = makeEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps]
+        )
+
+        let metricsPass = try await engine.sync()
+
+        XCTAssertEqual(metricsPass.deliveredRecords, 0)
+        let metricsPayloads = await channel.payloads(for: destination.id)
+        XCTAssertTrue(metricsPayloads.isEmpty)
+        let metricsAnchor = try await store.committedAnchor(
+            scope: scope,
+            type: steps
+        )
+        let metricsOmissionFormats = try await store.deliveryOmissionFormats(
+            for: destination.id
+        )
+        let seededPrime = try await store.primeRecord(scope: scope, type: steps)
+        XCTAssertNotNil(metricsAnchor)
+        XCTAssertEqual(
+            metricsOmissionFormats,
+            ["metrics"]
+        )
+        XCTAssertNotNil(seededPrime)
+
+        await store.close()
+        let reopenedStore = try HozzStore(
+            directory: directory.url.appending(path: "store")
+        )
+        let reopenedDelivery = DeliveryEngine(
+            store: reopenedStore,
+            channels: [.folder: channel]
+        )
+        let loadedDestination = try await reopenedDelivery.destination(
+            id: destination.id
+        )
+        destination = try XCTUnwrap(loadedDestination)
+        destination.format = .ndjson
+        try await reopenedDelivery.save(destination)
+
+        let replayAnchor = try await reopenedStore.committedAnchor(
+            scope: scope,
+            type: steps
+        )
+        let replayPrime = try await reopenedStore.primeRecord(
+            scope: scope,
+            type: steps
+        )
+        let replayOmissionFormats = try await reopenedStore.deliveryOmissionFormats(
+            for: destination.id
+        )
+        XCTAssertNil(replayAnchor)
+        XCTAssertNil(replayPrime)
+        XCTAssertTrue(replayOmissionFormats.isEmpty)
+
+        let replayEngine = makeEngine(
+            store: reopenedStore,
+            source: source,
+            delivery: reopenedDelivery,
+            types: [steps]
+        )
+        let losslessPass = try await replayEngine.sync(
+            ignoringCadence: true,
+            now: Date(timeIntervalSinceNow: 60)
+        )
+        XCTAssertEqual(losslessPass.deliveredRecords, 1)
+        let losslessPayloads = await channel.payloads(for: destination.id)
+        let payload = try XCTUnwrap(losslessPayloads.last)
+        XCTAssertTrue(
+            String(decoding: payload, as: UTF8.self)
+                .contains("\"kind\":\"sampleEncodingError\"")
+        )
+    }
+
+    func testLosslessEditDuringMetricsReadRejectsTheStaleCursorCommit()
+        async throws
+    {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        var destination = Destination(
+            name: "Racing format edit",
+            kind: .folder,
+            format: .metrics,
+            folderBookmark: Data("race".utf8)
+        )
+        try await delivery.save(destination)
+        let source = GatedHealthDataSource(
+            type: steps,
+            change: try encodingFailure(type: steps)
+        )
+        let engine = HealthSyncEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps],
+            lease: ExportWriterLease()
+        )
+
+        let stalePass = Task {
+            try await engine.sync(ignoringCadence: true)
+        }
+        await source.waitUntilReadStarts()
+
+        destination.format = .ndjson
+        try await delivery.save(destination)
+        await source.releaseRead()
+        let staleOutcome = try await stalePass.value
+
+        XCTAssertTrue(staleOutcome.wasInterrupted)
+        let staleAnchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        let staleFormats = try await store.deliveryOmissionFormats(
+            for: destination.id
+        )
+        XCTAssertNil(staleAnchor)
+        XCTAssertTrue(staleFormats.isEmpty)
+
+        let retry = try await engine.sync(
+            ignoringCadence: true,
+            now: Date(timeIntervalSinceNow: 60)
+        )
+        XCTAssertEqual(retry.deliveredRecords, 1)
+        let payloads = await channel.payloads(for: destination.id)
+        let payload = try XCTUnwrap(payloads.last)
+        XCTAssertTrue(
+            String(decoding: payload, as: UTF8.self)
+                .contains("\"kind\":\"sampleEncodingError\"")
+        )
+        let retryAnchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        XCTAssertNotNil(retryAnchor)
+    }
+
+    func testDisablingDestinationDuringHealthReadPreventsStaleTransmission()
+        async throws
+    {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        var destination = Destination(
+            name: "Disable during read",
+            kind: .folder,
+            format: .ndjson,
+            folderBookmark: Data("disable-race".utf8)
+        )
+        try await delivery.save(destination)
+        let source = GatedHealthDataSource(
+            type: steps,
+            change: sample("disable-race", type: steps)
+        )
+        let engine = HealthSyncEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps],
+            lease: ExportWriterLease()
+        )
+
+        let stalePass = Task {
+            try await engine.sync(ignoringCadence: true)
+        }
+        await source.waitUntilReadStarts()
+        destination.isEnabled = false
+        try await delivery.save(destination)
+        let editedState = try await store.deliveryState(for: destination.id)
+        await source.releaseRead()
+
+        let outcome = try await stalePass.value
+        let payloads = await channel.payloads(for: destination.id)
+        let anchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        let state = try await store.deliveryState(for: destination.id)
+        let receipts = try await store.receipts(for: destination.id)
+        let reopened = DeliveryEngine(store: store, channels: [:])
+        let saved = try await reopened.destination(id: destination.id)
+        XCTAssertTrue(outcome.wasInterrupted)
+        XCTAssertTrue(payloads.isEmpty)
+        XCTAssertNil(anchor)
+        XCTAssertEqual(state, editedState)
+        XCTAssertTrue(receipts.isEmpty)
+        XCTAssertEqual(saved?.isEnabled, false)
+    }
+
+    func testEndpointEditDuringHealthReadPreventsStaleTransmission()
+        async throws
+    {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.restAPI: channel])
+        var destination = Destination(
+            name: "Move during read",
+            kind: .restAPI,
+            format: .ndjson,
+            endpointURL: try XCTUnwrap(URL(string: "https://old.example"))
+        )
+        try await delivery.save(destination)
+        let source = GatedHealthDataSource(
+            type: steps,
+            change: sample("endpoint-race", type: steps)
+        )
+        let engine = HealthSyncEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps],
+            lease: ExportWriterLease()
+        )
+
+        let stalePass = Task {
+            try await engine.sync(ignoringCadence: true)
+        }
+        await source.waitUntilReadStarts()
+        destination.endpointURL = try XCTUnwrap(
+            URL(string: "https://new.example")
+        )
+        try await delivery.save(destination)
+        let editedState = try await store.deliveryState(for: destination.id)
+        await source.releaseRead()
+
+        let outcome = try await stalePass.value
+        let payloads = await channel.payloads(for: destination.id)
+        let anchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        let state = try await store.deliveryState(for: destination.id)
+        let receipts = try await store.receipts(for: destination.id)
+        let reopened = DeliveryEngine(store: store, channels: [:])
+        let saved = try await reopened.destination(id: destination.id)
+        XCTAssertTrue(outcome.wasInterrupted)
+        XCTAssertTrue(payloads.isEmpty)
+        XCTAssertNil(anchor)
+        XCTAssertEqual(state, editedState)
+        XCTAssertTrue(receipts.isEmpty)
+        XCTAssertEqual(saved?.endpointURL, URL(string: "https://new.example"))
+    }
+
+    func testDeletionDuringHealthReadPreventsStaleTransmissionAndBookkeeping()
+        async throws
+    {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        let destination = Destination(
+            name: "Delete during read",
+            kind: .folder,
+            format: .ndjson,
+            folderBookmark: Data("delete-race".utf8)
+        )
+        try await delivery.save(destination)
+        let source = GatedHealthDataSource(
+            type: steps,
+            change: sample("delete-race", type: steps)
+        )
+        let engine = HealthSyncEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps],
+            lease: ExportWriterLease()
+        )
+
+        let stalePass = Task {
+            try await engine.sync(ignoringCadence: true)
+        }
+        await source.waitUntilReadStarts()
+        try await delivery.delete(id: destination.id)
+        await source.releaseRead()
+
+        let outcome = try await stalePass.value
+        let payloads = await channel.payloads(for: destination.id)
+        let anchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        let state = try await store.deliveryState(for: destination.id)
+        let receipts = try await store.receipts(for: destination.id)
+        let revision = try await store.destinationRevision(id: destination.id)
+        XCTAssertTrue(outcome.wasInterrupted)
+        XCTAssertTrue(payloads.isEmpty)
+        XCTAssertNil(anchor)
+        XCTAssertNil(state)
+        XCTAssertTrue(receipts.isEmpty)
+        XCTAssertNil(revision)
+    }
+
+    func testMixedMetricsPageReplaysBothRecordsAfterLosslessEdit() async throws {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        var destination = Destination(
+            name: "Mixed metrics",
+            kind: .folder,
+            format: .metrics,
+            folderBookmark: Data("mixed".utf8)
+        )
+        try await delivery.save(destination)
+        let source = ScriptedHealthDataSource(
+            streams: [
+                steps: [
+                    metricSample("valid-step", type: steps, value: 12),
+                    try encodingFailure(type: steps)
+                ]
+            ]
+        )
+        let engine = makeEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps]
+        )
+
+        let metricsPass = try await engine.sync()
+        let omissionFormats = try await store.deliveryOmissionFormats(
+            for: destination.id
+        )
+        XCTAssertEqual(metricsPass.deliveredRecords, 1)
+        XCTAssertEqual(omissionFormats, ["metrics"])
+
+        destination.format = .ndjson
+        try await delivery.save(destination)
+        let losslessPass = try await engine.sync(
+            ignoringCadence: true,
+            now: Date(timeIntervalSinceNow: 60)
+        )
+        XCTAssertEqual(losslessPass.deliveredRecords, 2)
+        XCTAssertEqual(losslessPass.deliveredRecords, 2)
+        let losslessPayloads = await channel.payloads(for: destination.id)
+        let payload = try XCTUnwrap(losslessPayloads.last)
+        let text = String(decoding: payload, as: UTF8.self)
+        XCTAssertTrue(text.contains("\"id\":\"valid-step\""))
+        XCTAssertTrue(text.contains("\"kind\":\"sampleEncodingError\""))
+    }
+
+    func testMetricsSeriesDetailReplaysAfterSameDestinationBecomesLossless()
+        async throws
+    {
+        try await assertSeriesDetailReplaysAfterLosslessEdit(format: .metrics)
+    }
+
+    func testInfluxSeriesDetailReplaysAfterSameDestinationBecomesLossless()
+        async throws
+    {
+        try await assertSeriesDetailReplaysAfterLosslessEdit(format: .influx)
+    }
+
+    private func assertSeriesDetailReplaysAfterLosslessEdit(
+        format: DeliveryFormat
+    ) async throws {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(
+            store: store,
+            channels: [.folder: channel, .restAPI: channel]
+        )
+        var destination = Destination(
+            name: "\(format.rawValue) series",
+            kind: format == .metrics ? .folder : .restAPI,
+            format: format,
+            folderBookmark: format == .metrics ? Data("series".utf8) : nil,
+            endpointURL: format == .influx
+                ? try XCTUnwrap(URL(string: "https://series.example"))
+                : nil
+        )
+        try await delivery.save(destination)
+        let records = [
+            seriesDetail(
+                "series-page",
+                kind: QuantitySeriesEncoding.elementKind,
+                type: steps
+            ),
+            seriesDetail(
+                "series-end",
+                kind: QuantitySeriesEncoding.endKind,
+                type: steps
+            )
+        ]
+        let source = ScriptedHealthDataSource(streams: [steps: records])
+        let engine = makeEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps]
+        )
+
+        let lossy = try await engine.sync()
+
+        XCTAssertEqual(lossy.deliveredRecords, 0)
+        let lossyPayloads = await channel.payloads(for: destination.id)
+        let omissionFormats = try await store.deliveryOmissionFormats(
+            for: destination.id
+        )
+        let lossyAnchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        XCTAssertTrue(lossyPayloads.isEmpty)
+        XCTAssertEqual(omissionFormats, [format.rawValue])
+        XCTAssertNotNil(lossyAnchor)
+
+        destination.format = .ndjson
+        try await delivery.save(destination)
+        let replay = try await engine.sync(
+            ignoringCadence: true,
+            now: Date(timeIntervalSinceNow: 60)
+        )
+
+        XCTAssertEqual(replay.deliveredRecords, 2)
+        let payloads = await channel.payloads(for: destination.id)
+        let payload = try XCTUnwrap(payloads.last)
+        let text = String(decoding: payload, as: UTF8.self)
+        XCTAssertTrue(text.contains(QuantitySeriesEncoding.elementKind))
+        XCTAssertTrue(text.contains(QuantitySeriesEncoding.endKind))
+    }
+
+    func testCancelledSeriesOmissionCommitsCursorAndSealTogether()
+        async throws
+    {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        let destination = Destination(
+            name: "Cancelled series metrics",
+            kind: .folder,
+            format: .metrics,
+            folderBookmark: Data("cancelled-series".utf8)
+        )
+        try await delivery.save(destination)
+        let source = ScriptedHealthDataSource(
+            streams: [
+                steps: [
+                    seriesDetail(
+                        "cancelled-page",
+                        kind: QuantitySeriesEncoding.elementKind,
+                        type: steps
+                    ),
+                    seriesDetail(
+                        "cancelled-end",
+                        kind: QuantitySeriesEncoding.endKind,
+                        type: steps
+                    )
+                ]
+            ],
+            faults: [steps: [1: .cancelTask]]
+        )
+        let engine = makeEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps]
+        )
+
+        let outcome = await Task {
+            try? await engine.sync(ignoringCadence: true)
+        }.value
+
+        XCTAssertEqual(outcome?.wasInterrupted, true)
+        let anchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        let formats = try await store.deliveryOmissionFormats(
+            for: destination.id
+        )
+        XCTAssertEqual(anchor != nil, !formats.isEmpty)
+        XCTAssertNotNil(anchor)
+        XCTAssertEqual(formats, ["metrics"])
+    }
+
+    func testCancellationCannotCommitMetricsCursorWithoutItsOmissionSeal()
+        async throws
+    {
+        let store = try makeStore()
+        let channel = RecordingChannel()
+        let delivery = DeliveryEngine(store: store, channels: [.folder: channel])
+        let destination = Destination(
+            name: "Cancelled metrics",
+            kind: .folder,
+            format: .metrics,
+            folderBookmark: Data("cancelled".utf8)
+        )
+        try await delivery.save(destination)
+        let source = ScriptedHealthDataSource(
+            streams: [steps: [try encodingFailure(type: steps)]],
+            faults: [steps: [1: .cancelTask]]
+        )
+        let engine = makeEngine(
+            store: store,
+            source: source,
+            delivery: delivery,
+            types: [steps]
+        )
+
+        let outcome = await Task {
+            try? await engine.sync(ignoringCadence: true)
+        }.value
+
+        XCTAssertEqual(outcome?.wasInterrupted, true)
+        let anchor = try await store.committedAnchor(
+            scope: .destination(destination.id),
+            type: steps
+        )
+        let formats = try await store.deliveryOmissionFormats(
+            for: destination.id
+        )
+        XCTAssertEqual(
+            anchor != nil,
+            !formats.isEmpty,
+            "Cancellation may preserve neither or both, never an unsealed cursor."
+        )
+        XCTAssertNotNil(anchor)
+        XCTAssertEqual(formats, ["metrics"])
     }
 
     func testNothingIsSentWhenThereAreNoDestinations() async throws {

@@ -44,6 +44,7 @@ settings:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) DEBUG $(HOZZ_CLINICAL_FLAG)
     Release:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) $(HOZZ_CLINICAL_FLAG)
+      DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
 
 targetTemplates:
   HozzFramework:
@@ -202,6 +203,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatcube.Hozz
+        PROVISIONING_PROFILE_SPECIFIER: $(HOZZ_IOS_PROFILE)
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
     entitlements:
@@ -222,7 +224,8 @@ targets:
         # without a clear reason to hold them, and Hozz has nothing to show
         # for the entitlement until the feature is switched on.
         #
-        # To turn it on, change this to:
+        # Once snapshot reconciliation can emit clinical deletions, turning it
+        # on will also require changing this to:
         #     com.apple.developer.healthkit.access: [health-records]
         # and build with HOZZ_CLINICAL_FLAG=HOZZ_CLINICAL_RECORDS.
         com.apple.developer.healthkit.access: []
@@ -288,6 +291,8 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - Widget
+      - path: App/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - target: HozzCore
       - target: HozzStore
@@ -295,6 +300,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatcube.Hozz.widget
+        PROVISIONING_PROFILE_SPECIFIER: $(HOZZ_WIDGET_PROFILE)
         SKIP_INSTALL: true
     entitlements:
       path: Widget/HozzWidget.entitlements
@@ -306,6 +312,8 @@ targets:
       path: Widget/Info.plist
       properties:
         CFBundleDisplayName: Hozz
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
 
@@ -450,30 +458,19 @@ targets:
       - target: HozzReceiveMac
       - target: HozzMCPMac
       - target: hozz-mcp
-        embed: false
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: executables
     settings:
       base:
         PRODUCT_NAME: Hozz
         PRODUCT_BUNDLE_IDENTIFIER: com.thatcube.Hozz.mac
+        PROVISIONING_PROFILE_SPECIFIER: $(HOZZ_MAC_PROFILE)
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_HARDENED_RUNTIME: true
         COMBINE_HIDPI_IMAGES: true
-    # The MCP tool ships inside the bundle so the assistant configuration can
-    # point at one stable path that moves with the app. Inputs and outputs are
-    # declared because user script sandboxing is on.
-    postBuildScripts:
-      - name: Embed the MCP tool
-        inputFiles:
-          - $(BUILT_PRODUCTS_DIR)/hozz-mcp
-        outputFiles:
-          - $(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/hozz-mcp
-        script: |
-          set -eu
-          destination="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/MacOS"
-          mkdir -p "${destination}"
-          # Signing is left to Xcode's own phase, which runs after this and
-          # seals the bundle including anything copied in here.
-          cp -f "${BUILT_PRODUCTS_DIR}/hozz-mcp" "${destination}/hozz-mcp"
     entitlements:
       path: Mac/HozzMac.entitlements
       properties:
@@ -502,6 +499,8 @@ targets:
         CFBundleDisplayName: Hozz
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.healthcare-fitness
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "© 2026 Brandon Moore"
         # Required before a sandboxed app may advertise or browse Bonjour.
@@ -528,3 +527,5 @@ schemes:
     test:
       targets:
         - HozzTests
+    archive:
+      config: Release

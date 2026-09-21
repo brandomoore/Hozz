@@ -1,6 +1,6 @@
 import Foundation
 import Network
-import HozzReceive
+@testable import HozzReceive
 import XCTest
 
 /// End-to-end over a real socket.
@@ -158,6 +158,43 @@ final class ReceiverIntegrationTests: XCTestCase {
         XCTAssertEqual(total, 1)
     }
 
+    func testLowStorageHTTPResponseContainsNoDiskMeasurements() async throws {
+        let storageError = IngestStorageError.notEnoughRoom(
+            availableBytes: 123_456_789,
+            floorBytes: 987_654_321
+        )
+        await receiver.stop()
+        receiver = HealthReceiver(
+            store: store,
+            token: token,
+            serviceName: serviceName,
+            ingestBatch: { _, _ in throw storageError }
+        )
+        await receiver.start(port: 0)
+        port = try await waitForPort()
+        try await waitUntilThisReceiverAnswers()
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port!)/")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(sample(id: "low-space", value: 120).utf8)
+        request.setValue(token, forHTTPHeaderField: "Authorization")
+        request.setValue("low-space-batch", forHTTPHeaderField: "Idempotency-Key")
+        let (body, response) = try await URLSession.shared.data(for: request)
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 507)
+        XCTAssertEqual(
+            String(decoding: body, as: UTF8.self),
+            #"{"detail":"Free disk space on this Mac, then retry the delivery.","error":"not enough disk space"}"#
+        )
+        let total = try await store.totalRecordCount()
+        XCTAssertEqual(total, 0, "A refused delivery must not be stored or acknowledged.")
+        let events = await receiver.events
+        let localDiagnostic = try XCTUnwrap(storageError.errorDescription)
+        XCTAssertTrue(events.contains {
+            $0.outcome == .rejected(localDiagnostic)
+        }, "The actionable storage measurements must remain available locally.")
+    }
+
     /// The listener is reachable by anything on the same network — a guest, a
     /// smart TV, a housemate. Health data is the most sensitive data most
     /// people have.
@@ -192,6 +229,181 @@ final class ReceiverIntegrationTests: XCTestCase {
         XCTAssertEqual(second.json["duplicate"] as? Bool, true)
         let total = try await store.totalRecordCount()
         XCTAssertEqual(total, 1)
+    }
+
+    func testMixedCompatibilityBatchRejectsWithoutReceiptAndCanRetry() async throws {
+        let mixed = """
+            {"data":{"metrics":[{"name":"step_count","units":"count","data":[
+              {"id":"valid","date":"2026-01-01T10:00:00.000Z","qty":120},
+              {"id":"invalid","date":"2026-01-01T11:00:00.000Z","qty":true}
+            ]}]}}
+            """
+
+        let rejected = try await post(
+            body: mixed,
+            token: token,
+            idempotencyKey: "compatibility-partial"
+        )
+
+        XCTAssertEqual(rejected.status, 400)
+        let rejectedCount = try await store.totalRecordCount()
+        XCTAssertEqual(rejectedCount, 0)
+
+        let valid = """
+            {"data":{"metrics":[{"name":"step_count","units":"count","data":[
+              {"id":"valid","date":"2026-01-01T10:00:00.000Z","qty":120}
+            ]}]}}
+            """
+        let retry = try await post(
+            body: valid,
+            token: token,
+            idempotencyKey: "compatibility-partial"
+        )
+
+        XCTAssertEqual(retry.status, 200)
+        XCTAssertEqual(retry.json["duplicate"] as? Bool, false)
+        let retryCount = try await store.totalRecordCount()
+        XCTAssertEqual(retryCount, 1)
+    }
+
+    func testMalformedCompatibilityJSONRejectsWithoutReceiptAndCanRetry() async throws {
+        let rejected = try await post(
+            body: #"{"data":{"metrics":["#,
+            token: token,
+            idempotencyKey: "malformed-compatibility"
+        )
+
+        XCTAssertEqual(rejected.status, 400)
+        let rejectedCount = try await store.totalRecordCount()
+        XCTAssertEqual(rejectedCount, 0)
+
+        let retry = try await post(
+            body: """
+                {"data":{"metrics":[{"name":"steps","units":"count","data":[
+                  {"id":"valid","date":"2026-01-01T10:00:00.000Z","qty":1}
+                ]}]}}
+                """,
+            token: token,
+            idempotencyKey: "malformed-compatibility"
+        )
+
+        XCTAssertEqual(retry.status, 200)
+        XCTAssertEqual(retry.json["duplicate"] as? Bool, false)
+        let retryCount = try await store.totalRecordCount()
+        XCTAssertEqual(retryCount, 1)
+    }
+
+    func testTruncatedJSONArrayRejectsWithoutReceiptAndCanRetry() async throws {
+        try await assertRejectedArrayIsRetryable(
+            "[\(sample(id: "truncated", value: 1))",
+            key: "truncated-array"
+        )
+    }
+
+    func testTruncatedArrayContainingConnectionTestKindIsRejectedAndRetryable() async throws {
+        try await assertRejectedArrayIsRetryable(
+            #"[{"kind":"hozzConnectionTest","schemaVersion":1}"#,
+            key: "truncated-connection-test-array"
+        )
+    }
+
+    func testBOMPrefixedTruncatedArrayIsRejectedAndRetryable() async throws {
+        try await assertRejectedArrayIsRetryable(
+            "\u{FEFF}[\(sample(id: "bom-truncated", value: 1))",
+            key: "bom-truncated-array"
+        )
+    }
+
+    private func assertRejectedArrayIsRetryable(
+        _ body: String,
+        key: String
+    ) async throws {
+        let rejected = try await post(
+            body: body,
+            token: token,
+            idempotencyKey: key
+        )
+        XCTAssertEqual(rejected.status, 400)
+        let rejectedCount = try await store.totalRecordCount()
+        XCTAssertEqual(rejectedCount, 0)
+        let retry = try await post(
+            body: sample(id: "recovered", value: 2),
+            token: token,
+            idempotencyKey: key
+        )
+        XCTAssertEqual(retry.status, 200)
+        XCTAssertEqual(retry.json["duplicate"] as? Bool, false)
+        let retryCount = try await store.totalRecordCount()
+        XCTAssertEqual(retryCount, 1)
+    }
+
+    func testDateLessStableDeletionWithLegacyAliasReturnsRetryableConflict() async throws {
+        let date = "2026-01-01 10:00:00 +0000"
+        let legacy = """
+            {"data":{"metrics":[{"name":"step_count","units":"count","data":[
+              {"date":"\(date)","qty":1}
+            ]}]}}
+            """
+        let accepted = try await post(
+            body: legacy,
+            token: token,
+            idempotencyKey: "legacy-alias"
+        )
+        XCTAssertEqual(accepted.status, 200)
+        let dateLess = """
+            {"data":{"metrics":[],"deletions":[
+              {"id":"stable","name":"step_count","type":"step_count","date":""}
+            ]}}
+            """
+        let rejected = try await post(
+            body: dateLess,
+            token: token,
+            idempotencyKey: "stable-alias-delete"
+        )
+        XCTAssertEqual(rejected.status, 409)
+        let stillLive = try await store.totalRecordCount()
+        XCTAssertEqual(stillLive, 1)
+
+        let dated = """
+            {"data":{"metrics":[],"deletions":[
+              {"id":"stable","name":"step_count","type":"step_count","date":"\(date)"}
+            ]}}
+            """
+        let retry = try await post(
+            body: dated,
+            token: token,
+            idempotencyKey: "stable-alias-delete"
+        )
+        XCTAssertEqual(retry.status, 409)
+        let remaining = try await store.totalRecordCount()
+        XCTAssertEqual(remaining, 1)
+    }
+
+    func testCanonicalHealthKitDeletionWithLegacyAliasReturnsRetryableConflict() async throws {
+        let legacy = """
+            {"data":{"metrics":[{"name":"step_count","units":"count","data":[
+              {"date":"2026-01-01 10:00:00 +0000","qty":1}
+            ]}]}}
+            """
+        let accepted = try await post(
+            body: legacy,
+            token: token,
+            idempotencyKey: "canonical-legacy-alias"
+        )
+        XCTAssertEqual(accepted.status, 200)
+
+        let canonicalDeletion =
+            #"{"id":"healthkit-stable","kind":"deletion","schemaVersion":1,"type":"HKQuantityTypeIdentifierStepCount"}"#
+        for _ in 0..<2 {
+            let rejected = try await post(
+                body: canonicalDeletion,
+                token: token,
+                idempotencyKey: "canonical-healthkit-delete"
+            )
+            XCTAssertEqual(rejected.status, 409)
+        }
+        let remaining = try await store.totalRecordCount()
+        XCTAssertEqual(remaining, 1)
     }
 
     /// A connection test has to succeed visibly, or the user checking their

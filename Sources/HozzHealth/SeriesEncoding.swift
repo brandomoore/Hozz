@@ -177,6 +177,10 @@ public enum SeriesEncoding {
         object["catalogVersion"] = HealthTypeCatalog.version
         object["id"] = header.id.uuidString.lowercased()
         object["type"] = shape.typeIdentifier
+        object["canonicalType"] = HozzHealthArchiveContract.canonicalType(
+            for: shape.typeIdentifier,
+            kind: shape.headerKind
+        )
 
         return .upsert(
             CapturedHealthObject(
@@ -216,10 +220,32 @@ public enum SeriesEncoding {
 
         let object: [String: Any] = [
             "kind": shape.elementKind,
-            "schemaVersion": 1,
+            "schemaVersion": HozzHealthArchiveContract.schemaVersion,
             "id": id.uuidString.lowercased(),
+            "canonicalId": HozzHealthArchiveContract.canonicalID(
+                for: id.uuidString.lowercased()
+            ),
+            "recordVersion": 1,
+            "canonicalType": HozzHealthArchiveContract.canonicalType(
+                for: shape.typeIdentifier,
+                kind: shape.elementKind
+            ),
             "type": shape.typeIdentifier,
             "sample": sample.uuidString.lowercased(),
+            "parentCanonicalId": HozzHealthArchiveContract.canonicalID(
+                for: sample.uuidString.lowercased()
+            ),
+            "sourceRecord": [
+                "store": HozzHealthArchiveContract.sourceStore,
+                "id": sample.uuidString.lowercased(),
+                "type": shape.typeIdentifier
+            ],
+            "lineage": [
+                [
+                    "store": HozzHealthArchiveContract.sourceStore,
+                    "recordId": sample.uuidString.lowercased()
+                ]
+            ],
             "sequence": sequence,
             "offset": offset,
             "count": elements.count,
@@ -248,10 +274,32 @@ public enum SeriesEncoding {
         let id = identifier(shape: shape, sample: sample, suffix: "end")
         let object: [String: Any] = [
             "kind": shape.endKind,
-            "schemaVersion": 1,
+            "schemaVersion": HozzHealthArchiveContract.schemaVersion,
             "id": id.uuidString.lowercased(),
+            "canonicalId": HozzHealthArchiveContract.canonicalID(
+                for: id.uuidString.lowercased()
+            ),
+            "recordVersion": 1,
+            "canonicalType": HozzHealthArchiveContract.canonicalType(
+                for: shape.typeIdentifier,
+                kind: shape.endKind
+            ),
             "type": shape.typeIdentifier,
             "sample": sample.uuidString.lowercased(),
+            "parentCanonicalId": HozzHealthArchiveContract.canonicalID(
+                for: sample.uuidString.lowercased()
+            ),
+            "sourceRecord": [
+                "store": HozzHealthArchiveContract.sourceStore,
+                "id": sample.uuidString.lowercased(),
+                "type": shape.typeIdentifier
+            ],
+            "lineage": [
+                [
+                    "store": HozzHealthArchiveContract.sourceStore,
+                    "recordId": sample.uuidString.lowercased()
+                ]
+            ],
             shape.elementsKey: elementCount,
             "startDate": timestamp(sampleStart),
             "endDate": timestamp(sampleEnd)
@@ -293,6 +341,17 @@ public enum SeriesEncoding {
                 bytes[8], bytes[9], bytes[10], bytes[11],
                 bytes[12], bytes[13], bytes[14], bytes[15]
             )
+        )
+    }
+
+    public static func completionCanonicalID(
+        shape: SeriesShape,
+        sample: UUID
+    ) -> String {
+        HozzHealthArchiveContract.canonicalID(
+            for: identifier(shape: shape, sample: sample, suffix: "end")
+                .uuidString
+                .lowercased()
         )
     }
 

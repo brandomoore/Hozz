@@ -28,7 +28,7 @@ There is no account, analytics, advertising, or hosted relay.
 **Nothing leaves your iPhone until you add a destination and confirm it** — Hozz
 ships with no default destination and never picks one for you.
 
-> **Early alpha.** Hozz is honest about what it does and doesn't do yet. Where a
+> **Early beta.** Hozz is honest about what it does and doesn't do yet. Where a
 > Health data type isn't supported, it says so plainly rather than quietly
 > pretending it was exported. See
 > [What Hozz keeps, and its limits](#what-hozz-keeps-and-its-limits) below.
@@ -130,9 +130,12 @@ against Hozz without reading the source.
 
 ## Getting started
 
-Hozz is an early alpha and isn't on the App Store yet, so today you build it
-yourself from source with Xcode. See
-**[CONTRIBUTING.md](CONTRIBUTING.md)** for setup.
+Hozz is preparing its first public beta. Download availability is listed in
+**[GitHub releases](https://github.com/brandomoore/Hozz/releases)**; a platform
+without a download or TestFlight invitation is not released yet. See the
+**[beta testing guide](docs/beta-testing.md)** for setup, known limits, and
+privacy-safe feedback, or **[CONTRIBUTING.md](CONTRIBUTING.md)** to build from
+source.
 
 You'll want:
 
@@ -140,6 +143,16 @@ You'll want:
 - Optionally, a **Mac running macOS 14 or newer** for the companion receiver,
   browser, charts, and assistant — or any of the other destinations above
   instead.
+
+### Android preview
+
+This repository also contains the **Android beta candidate** under
+[`Android/`](Android/). It can import a lossless Hozz NDJSON/ZIP archive into a
+local canonical store, show archive-only records, preview Health Connect mapping
+loss, and explicitly write the mapped subset on Android 14/API 34 or newer.
+Apple Health extraction still happens on an Apple device. Health Connect writes
+are experimental and opt-in; a downloadable APK is not a Google Play release
+or policy approval. See [Android beta instructions](docs/android-beta.md).
 
 ## What Hozz keeps, and its limits
 
@@ -160,7 +173,9 @@ catalogues or reports as unsupported rather than silently claiming as coverage:
   workout's own statistics are exact.
 - **Clinical (health) records are off by default.** The code to read FHIR
   records from a connected provider is compiled out of the default build, on
-  purpose. Enabling it is a deliberate, documented two-step change — see
+  purpose. That reader is a development spike and does not yet reconcile
+  disappearing records into tombstones, so clinical export is not supported
+  coverage. Its build gates are documented for testing — see
   [CONTRIBUTING.md](CONTRIBUTING.md#enabling-clinical-health-records).
 - **Hozz doesn't write back into Apple Health.** That's a decision, not an
   oversight: Health would permanently stamp restored data as Hozz's, has no way

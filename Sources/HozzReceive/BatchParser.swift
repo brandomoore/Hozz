@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import HozzCore
 
 /// One Health sample as it arrives from a phone.
@@ -16,6 +17,9 @@ public struct HealthRecord: Hashable, Sendable {
     public let value: Double?
     public let unit: String?
     public let sourceName: String?
+    public let legacyAliasID: String?
+    public let legacyTypeAlias: String?
+    public let isLegacyCompatibilityIdentity: Bool
     public let raw: Data
 
     public init(
@@ -27,6 +31,9 @@ public struct HealthRecord: Hashable, Sendable {
         value: Double? = nil,
         unit: String? = nil,
         sourceName: String? = nil,
+        legacyAliasID: String? = nil,
+        legacyTypeAlias: String? = nil,
+        isLegacyCompatibilityIdentity: Bool = false,
         raw: Data
     ) {
         self.id = id
@@ -37,6 +44,9 @@ public struct HealthRecord: Hashable, Sendable {
         self.value = value
         self.unit = unit
         self.sourceName = sourceName
+        self.legacyAliasID = legacyAliasID
+        self.legacyTypeAlias = legacyTypeAlias
+        self.isLegacyCompatibilityIdentity = isLegacyCompatibilityIdentity
         self.raw = raw
     }
 }
@@ -115,11 +125,25 @@ public struct HealthDeletion: Hashable, Sendable {
     /// Set only for payload shapes that carry no per-sample identifier, where
     /// a deletion can only be matched by type and timestamp.
     public let startDate: Date?
+    /// The pre-stable-ID compatibility identity, constrained by type and time.
+    public let legacyAliasID: String?
+    public let legacyStartDate: Date?
+    public let requiresLegacyAliasResolution: Bool
 
-    public init(id: String, type: String? = nil, startDate: Date? = nil) {
+    public init(
+        id: String,
+        type: String? = nil,
+        startDate: Date? = nil,
+        legacyAliasID: String? = nil,
+        legacyStartDate: Date? = nil,
+        requiresLegacyAliasResolution: Bool = false
+    ) {
         self.id = id
         self.type = type
         self.startDate = startDate
+        self.legacyAliasID = legacyAliasID
+        self.legacyStartDate = legacyStartDate
+        self.requiresLegacyAliasResolution = requiresLegacyAliasResolution
     }
 }
 
@@ -459,11 +483,17 @@ public struct ReceivedQuantitySeriesEnd: Hashable, Sendable {
 
 public enum BatchParseError: Error, LocalizedError, Sendable {
     case connectionTest
+    case invalidTopLevelJSONArray
+    case incompleteCompatibilityEnvelope(unreadableChildren: Int)
 
     public var errorDescription: String? {
         switch self {
         case .connectionTest:
             "This was a connection test, not a batch of samples."
+        case .invalidTopLevelJSONArray:
+            "The top-level JSON array is incomplete or invalid."
+        case .incompleteCompatibilityEnvelope(let unreadableChildren):
+            "The compatibility payload contains \(unreadableChildren) record(s) that cannot be represented safely."
         }
     }
 }
@@ -491,11 +521,11 @@ public enum BatchParser {
     /// - 5: workout statistics and per-activity legs.
     /// - 6: the readings behind a quantity aggregate, and their end markers.
     /// - 7: per-type coverage reports.
-    public static let parserVersion = 7
+    /// - 8: atomic compatibility envelopes with typed sleep and workout duration.
+    public static let parserVersion = 8
 
     public static func parse(_ payload: Data) throws -> ParsedBatch {
-        let text = String(decoding: payload, as: UTF8.self)
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = normalizedText(payload)
         guard !trimmed.isEmpty else {
             return ParsedBatch(records: [], deletions: [], unreadableCount: 0)
         }
@@ -503,15 +533,15 @@ public enum BatchParser {
         // A connection test is a real, valid request that carries no samples.
         // Treating it as an unparseable batch would report a working setup as
         // broken at exactly the moment the user is checking it.
-        if trimmed.contains("hozzConnectionTest") {
+        if isConnectionTest(trimmed) {
             throw BatchParseError.connectionTest
         }
 
         if trimmed.hasPrefix("[") {
-            return parseJSONArray(trimmed)
+            return try parseJSONArray(trimmed)
         }
-        if trimmed.hasPrefix("{"), trimmed.contains("\"metrics\"") {
-            return parseMetricsEnvelope(trimmed)
+        if trimmed.hasPrefix("{"), isCompatibilityEnvelope(trimmed) {
+            return try parseMetricsEnvelope(trimmed)
         }
         if trimmed.hasPrefix("{") {
             return parseLines(trimmed)
@@ -522,6 +552,32 @@ public enum BatchParser {
         return parseLines(trimmed)
     }
 
+    private static func normalizedText(_ payload: Data) -> String {
+        var text = String(decoding: payload, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.unicodeScalars.first?.value == 0xFEFF {
+            text.removeFirst()
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    private static func isConnectionTest(_ text: String) -> Bool {
+        guard
+            let data = text.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+            Set(object.keys) == ["kind", "schemaVersion"],
+            object["kind"] as? String == "hozzConnectionTest",
+            let version = object["schemaVersion"] as? NSNumber,
+            CFGetTypeID(version) != CFBooleanGetTypeID(),
+            version.doubleValue == 1
+        else {
+            return false
+        }
+        return true
+    }
+
     private static func looksLikeCSV(_ text: String) -> Bool {
         guard let first = text.split(separator: "\n", maxSplits: 1).first else {
             return false
@@ -529,12 +585,12 @@ public enum BatchParser {
         return first.contains("startDate") && first.contains(",")
     }
 
-    private static func parseJSONArray(_ text: String) -> ParsedBatch {
+    private static func parseJSONArray(_ text: String) throws -> ParsedBatch {
         guard
             let data = text.data(using: .utf8),
             let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else {
-            return ParsedBatch(records: [], deletions: [], unreadableCount: 1)
+            throw BatchParseError.invalidTopLevelJSONArray
         }
         return collect(items)
     }
@@ -613,10 +669,8 @@ public enum BatchParser {
             // on the receiver permanently and kept being served as live data.
             let isDeletion = (object["deleted"] as? Bool == true)
                 || (object["kind"] as? String == "deletion")
-            if isDeletion, let id = object["id"] as? String {
-                deletions.append(
-                    HealthDeletion(id: id, type: object["type"] as? String)
-                )
+            if isDeletion, let deletion = canonicalDeletion(from: object) {
+                deletions.append(deletion)
                 continue
             }
 
@@ -886,55 +940,126 @@ public enum BatchParser {
         )
     }
 
-    /// The metrics shape carries no per-sample identifier, so one is derived
-    /// from the type and timestamp. That is what makes re-delivering the same
-    /// metric update a row rather than duplicate it.
-    private static func parseMetricsEnvelope(_ text: String) -> ParsedBatch {
+    /// New Hozz compatibility payloads carry the HealthKit identifier. Older
+    /// Health Auto Export payloads do not, so those retain the type-and-time
+    /// fallback that makes a replay update rather than duplicate.
+    private static func parseMetricsEnvelope(_ text: String) throws -> ParsedBatch {
         guard
             let data = text.data(using: .utf8),
             let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let payload = envelope["data"] as? [String: Any]
         else {
-            return ParsedBatch(records: [], deletions: [], unreadableCount: 1)
+            throw BatchParseError.incompleteCompatibilityEnvelope(unreadableChildren: 1)
         }
 
         var records: [HealthRecord] = []
+        var workoutDetails: [ReceivedWorkoutDetail] = []
         var unreadable = 0
-        for metric in payload["metrics"] as? [[String: Any]] ?? [] {
-            let name = metric["name"] as? String ?? "unknown"
-            let units = metric["units"] as? String
-            for point in metric["data"] as? [[String: Any]] ?? [] {
+        let metricValues = payload["metrics"] as? [Any] ?? []
+        if payload["metrics"] == nil || payload["metrics"] as? [Any] == nil {
+            unreadable += 1
+        }
+        for metricValue in metricValues {
+            guard
+                let metric = metricValue as? [String: Any],
+                let name = metric["name"] as? String,
+                !name.isEmpty,
+                let units = metric["units"] as? String,
+                let pointValues = metric["data"] as? [Any]
+            else {
+                unreadable += 1
+                continue
+            }
+            for pointValue in pointValues {
                 guard
-                    let dateText = point["date"] as? String,
-                    let date = Timestamps.date(from: dateText)
+                    let point = pointValue as? [String: Any],
+                    let dateText = (point["date"] as? String)
+                        ?? (point["startDate"] as? String),
+                    let date = metricsDate(from: dateText)
                 else {
                     unreadable += 1
                     continue
                 }
-                let end = (point["endDate"] as? String)
-                    .flatMap(Timestamps.date(from:)) ?? date
-                let identifier = "\(name):\(dateText)"
-                var object: [String: Any] = [
-                    "id": identifier,
-                    "type": name,
-                    "startDate": dateText
-                ]
-                if let quantity = numeric(point["qty"]) {
-                    object["value"] = quantity
+                let end: Date
+                if let endText = point["endDate"] as? String,
+                   let parsedEnd = metricsDate(from: endText) {
+                    end = parsedEnd
+                } else if point["endDate"] == nil && name != "sleep_analysis" {
+                    end = date
+                } else {
+                    unreadable += 1
+                    continue
                 }
-                if let units {
-                    object["unit"] = units
+                let identifier: String
+                let legacyAliasID: String?
+                if let candidate = point["id"] {
+                    guard let stableID = candidate as? String, !stableID.isEmpty else {
+                        unreadable += 1
+                        continue
+                    }
+                    identifier = stableID
+                    legacyAliasID = "\(name):\(dateText)"
+                } else {
+                    identifier = "\(name):\(dateText)"
+                    legacyAliasID = nil
                 }
+                let value: Double?
+                if name == "sleep_analysis" {
+                    if point["value"] is String {
+                        guard
+                            units == "hr",
+                            let durationHours = numeric(point["qty"]),
+                            durationHours >= 0,
+                            abs(end.timeIntervalSince(date) - durationHours * 3_600) <= 1
+                        else {
+                            unreadable += 1
+                            continue
+                        }
+                        value = compatibilitySleepStage(in: point)
+                    } else {
+                        value = numeric(point["qty"])
+                    }
+                } else if point["Avg"] != nil || point["Min"] != nil || point["Max"] != nil {
+                    let minimum = numeric(point["Min"])
+                    let average = numeric(point["Avg"])
+                    let maximum = numeric(point["Max"])
+                    guard
+                        let minimum,
+                        let average,
+                        let maximum,
+                        minimum == average,
+                        average == maximum
+                    else {
+                        unreadable += 1
+                        continue
+                    }
+                    value = average
+                } else {
+                    value = numeric(point["qty"])
+                }
+                guard let value else {
+                    unreadable += 1
+                    continue
+                }
+                var object = point
+                object["id"] = identifier
+                object["type"] = name
+                object["kind"] = name == "sleep_analysis" ? "category" : "quantity"
+                object["startDate"] = dateText
+                object["value"] = value
+                object["unit"] = units
                 records.append(
                     HealthRecord(
                         id: identifier,
                         type: name,
-                        kind: "quantity",
+                        kind: name == "sleep_analysis" ? "category" : "quantity",
                         startDate: date,
                         endDate: end,
-                        value: numeric(point["qty"]),
+                        value: value,
                         unit: units,
                         sourceName: point["source"] as? String,
+                        legacyAliasID: legacyAliasID,
+                        isLegacyCompatibilityIdentity: legacyAliasID == nil,
                         raw: (try? JSONSerialization.data(
                             withJSONObject: object,
                             options: [.sortedKeys]
@@ -947,62 +1072,185 @@ public enum BatchParser {
         // Workouts travel in their own key, not in `metrics`. Missing them meant
         // every workout sent in this format was discarded, counted as nothing,
         // and answered 200 — so it was never sent again.
-        for workout in payload["workouts"] as? [[String: Any]] ?? [] {
+        let workoutValues = payload["workouts"] as? [Any] ?? []
+        if payload["workouts"] != nil && payload["workouts"] as? [Any] == nil {
+            unreadable += 1
+        }
+        for workoutValue in workoutValues {
             guard
+                let workout = workoutValue as? [String: Any],
                 let identifier = workout["id"] as? String,
+                !identifier.isEmpty,
+                let name = workout["name"] as? String,
+                !name.isEmpty,
                 let startText = workout["start"] as? String,
-                let start = Timestamps.date(from: startText)
+                let start = metricsDate(from: startText),
+                let endText = workout["end"] as? String,
+                let end = metricsDate(from: endText)
             else {
                 unreadable += 1
                 continue
             }
-            let end = (workout["end"] as? String)
-                .flatMap(Timestamps.date(from:)) ?? start
-            let name = workout["name"] as? String ?? "Workout"
-            let object: [String: Any] = [
-                "id": identifier,
-                "type": name,
-                "kind": "workout",
-                "startDate": startText,
-                "endDate": workout["end"] as? String ?? startText
-            ]
+            let duration = numeric(workout["duration"])
+            guard
+                duration.map({ $0 >= 0 }) ?? true,
+                workout["duration"] == nil || numeric(workout["duration"]) != nil
+            else {
+                unreadable += 1
+                continue
+            }
+            var object = workout
+            object["id"] = identifier
+            object["type"] = "workout"
+            object["kind"] = "workout"
+            object["startDate"] = startText
+            object["endDate"] = endText
+            if let duration {
+                object["value"] = duration
+                object["unit"] = "sec"
+            }
             records.append(
                 HealthRecord(
                     id: identifier,
-                    type: name,
+                    type: "workout",
                     kind: "workout",
                     startDate: start,
                     endDate: end,
-                    value: nil,
-                    unit: nil,
+                    value: duration,
+                    unit: duration == nil ? nil : "sec",
                     sourceName: workout["source"] as? String,
+                    legacyTypeAlias: name,
                     raw: (try? JSONSerialization.data(
                         withJSONObject: object,
                         options: [.sortedKeys]
                     )) ?? Data()
                 )
             )
-        }
-
-        var deletions: [HealthDeletion] = []
-        for deletion in payload["deletions"] as? [[String: Any]] ?? [] {
-            guard
-                let name = (deletion["name"] as? String) ?? (deletion["type"] as? String),
-                let dateText = deletion["date"] as? String,
-                let date = Timestamps.date(from: dateText)
-            else {
-                continue
-            }
-            deletions.append(
-                HealthDeletion(id: "\(name):\(dateText)", type: name, startDate: date)
+            workoutDetails.append(
+                ReceivedWorkoutDetail(
+                    id: identifier,
+                    startDate: start,
+                    endDate: end,
+                    activityType: nil,
+                    duration: duration,
+                    sourceName: workout["source"] as? String,
+                    statistics: [],
+                    activities: [],
+                    provenance: .compatibility
+                )
             )
         }
 
+        var deletions: [HealthDeletion] = []
+        let deletionValues = payload["deletions"] as? [Any] ?? []
+        if payload["deletions"] != nil && payload["deletions"] as? [Any] == nil {
+            unreadable += 1
+        }
+        for deletionValue in deletionValues {
+            guard
+                let deletion = deletionValue as? [String: Any],
+                let name =
+                (deletion["name"] as? String) ?? (deletion["type"] as? String)
+            else {
+                unreadable += 1
+                continue
+            }
+            if let candidate = deletion["id"],
+               (!(candidate is String) || (candidate as? String)?.isEmpty == true) {
+                unreadable += 1
+                continue
+            }
+            let dateText = deletion["date"] as? String
+            let date = dateText.flatMap(metricsDate(from:))
+            if let dateText, !dateText.isEmpty, date == nil {
+                unreadable += 1
+                continue
+            }
+            if let identifier = (deletion["id"] as? String),
+               !identifier.isEmpty {
+                deletions.append(
+                    HealthDeletion(
+                        id: identifier,
+                        type: name,
+                        startDate: nil,
+                        legacyAliasID: dateText.flatMap {
+                            $0.isEmpty ? nil : "\(name):\($0)"
+                        },
+                        legacyStartDate: date,
+                        requiresLegacyAliasResolution:
+                            dateText?.isEmpty != false
+                    )
+                )
+            } else if let dateText, let date {
+                deletions.append(
+                    HealthDeletion(
+                        id: "\(name):\(dateText)",
+                        type: name,
+                        startDate: date
+                    )
+                )
+            } else {
+                unreadable += 1
+            }
+        }
+
+        guard unreadable == 0 else {
+            throw BatchParseError.incompleteCompatibilityEnvelope(
+                unreadableChildren: unreadable
+            )
+        }
         return ParsedBatch(
             records: records,
             deletions: deletions,
-            unreadableCount: unreadable
+            workoutDetails: workoutDetails,
+            unreadableCount: 0
         )
+    }
+
+    private static func compatibilitySleepStage(
+        in point: [String: Any]
+    ) -> Double? {
+        guard let stage = point["value"] as? String else {
+            return nil
+        }
+
+        switch stage {
+        case "In Bed": return 0
+        case "Asleep": return 1
+        case "Awake": return 2
+        case "Core": return 3
+        case "Deep": return 4
+        case "REM": return 5
+        case "Unspecified":
+            guard
+                let raw = numeric(point["rawValue"]),
+                raw.rounded() == raw,
+                raw >= Double(Int32.min),
+                raw <= Double(Int32.max)
+            else {
+                return nil
+            }
+            return raw
+        default: return nil
+        }
+    }
+
+    private static func isCompatibilityEnvelope(_ text: String) -> Bool {
+        if
+            let data = text.data(using: .utf8),
+            let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let payload = envelope["data"] as? [String: Any]
+        {
+            return payload.keys.contains("metrics")
+                || payload.keys.contains("workouts")
+                || payload.keys.contains("deletions")
+        }
+        return text.contains("\"data\"")
+            && (
+                text.contains("\"metrics\"")
+                    || text.contains("\"workouts\"")
+                    || text.contains("\"deletions\"")
+            )
     }
 
     private static func parseCSV(_ text: String) -> ParsedBatch {
@@ -1028,10 +1276,8 @@ public enum BatchParser {
             }
             if let deleted = object["deleted"] as? String,
                deleted == "true" || deleted == "1",
-               let id = object["id"] as? String {
-                deletions.append(
-                    HealthDeletion(id: id, type: object["type"] as? String)
-                )
+               let deletion = canonicalDeletion(from: object) {
+                deletions.append(deletion)
                 continue
             }
             // CSV carries every field as text, so the numeric column is
@@ -1053,14 +1299,48 @@ public enum BatchParser {
         )
     }
 
+    private static func canonicalDeletion(
+        from object: [String: Any]
+    ) -> HealthDeletion? {
+        guard let id = object["id"] as? String, !id.isEmpty else {
+            return nil
+        }
+        let sourceType = object["type"] as? String
+        let legacyType = sourceType.flatMap(
+            CompatibilityMetricName.legacyNamespace(for:)
+        )
+        return HealthDeletion(
+            id: id,
+            type: legacyType ?? sourceType,
+            requiresLegacyAliasResolution: legacyType != nil
+        )
+    }
+
     static func numeric(_ value: Any?) -> Double? {
-        switch value {
+        if let number = value as? NSNumber,
+           CFGetTypeID(number) == CFBooleanGetTypeID() {
+            return nil
+        }
+        let result: Double? = switch value {
         case let number as Double: number
         case let number as Int: Double(number)
         case let number as NSNumber: number.doubleValue
         case let text as String: Double(text)
         default: nil
         }
+        return result?.isFinite == true ? result : nil
+    }
+
+    private static func metricsDate(from text: String) -> Date? {
+        if let date = Timestamps.date(from: text) {
+            return date
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .gmt
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+        return formatter.date(from: text)
     }
 }
 
@@ -1471,6 +1751,11 @@ enum MoodAndMedicationShape {
 /// cost no extra query. Without them a workout is an activity type and a
 /// duration: you can tell a run happened and nothing about how it went.
 public struct ReceivedWorkoutDetail: Hashable, Sendable {
+    public enum Provenance: Hashable, Sendable {
+        case canonical
+        case compatibility
+    }
+
     public struct Statistic: Hashable, Sendable {
         public let type: String
         public let unit: String
@@ -1529,6 +1814,7 @@ public struct ReceivedWorkoutDetail: Hashable, Sendable {
     /// Empty for an ordinary workout. A triathlon is one workout and three
     /// efforts, and an average across all three describes none of them.
     public let activities: [Activity]
+    public let provenance: Provenance
 
     public init(
         id: String,
@@ -1538,7 +1824,8 @@ public struct ReceivedWorkoutDetail: Hashable, Sendable {
         duration: Double?,
         sourceName: String?,
         statistics: [Statistic],
-        activities: [Activity]
+        activities: [Activity],
+        provenance: Provenance = .canonical
     ) {
         self.id = id
         self.startDate = startDate
@@ -1548,6 +1835,7 @@ public struct ReceivedWorkoutDetail: Hashable, Sendable {
         self.sourceName = sourceName
         self.statistics = statistics
         self.activities = activities
+        self.provenance = provenance
     }
 }
 
@@ -1582,20 +1870,26 @@ enum WorkoutDetailShape {
                     statistics: Self.statistics(in: activity["statistics"])
                 )
             }
+        let endDate = (object["endDate"] as? String)
+            .flatMap(Timestamps.date(from:))
+        let activityType = BatchParser.numeric(object["activityType"]).map { Int($0) }
+        let duration = BatchParser.numeric(object["duration"])
+        let sourceName = (object["source"] as? [String: Any])?["name"] as? String
 
-        // A workout with neither statistics nor legs has nothing this table
-        // would hold that the sample row does not already carry.
-        guard !statistics.isEmpty || !activities.isEmpty else {
+        guard
+            endDate != nil || activityType != nil || duration != nil ||
+                sourceName != nil || !statistics.isEmpty || !activities.isEmpty
+        else {
             return nil
         }
 
         return ReceivedWorkoutDetail(
             id: id,
             startDate: start,
-            endDate: (object["endDate"] as? String).flatMap(Timestamps.date(from:)),
-            activityType: BatchParser.numeric(object["activityType"]).map { Int($0) },
-            duration: BatchParser.numeric(object["duration"]),
-            sourceName: (object["source"] as? [String: Any])?["name"] as? String,
+            endDate: endDate,
+            activityType: activityType,
+            duration: duration,
+            sourceName: sourceName,
             statistics: statistics,
             activities: activities
         )

@@ -11,6 +11,12 @@ public enum HozzStoreError: Error, LocalizedError, Equatable, Sendable {
     case stalePrimeFrontier(type: String)
     /// A prime advance arrived for a type that has no window to advance.
     case unknownPrime(type: String)
+    /// A destination changed after a sync captured its configuration.
+    case staleDestinationConfiguration(
+        id: UUID,
+        expected: Int64,
+        actual: Int64?
+    )
     case unknownRun(UUID)
     case unknownPart(runID: UUID, sequence: Int)
     case partNotOpen(runID: UUID, sequence: Int)
@@ -25,6 +31,10 @@ public enum HozzStoreError: Error, LocalizedError, Equatable, Sendable {
             "Hozz refused to move the recent-history frontier for \(type) because it changed underneath the walk."
         case .unknownPrime(let type):
             "Hozz has no recent-history window recorded for \(type)."
+        case .staleDestinationConfiguration(let id, let expected, let actual):
+            "Destination \(id.uuidString) changed while a sync using revision "
+                + "\(expected) was running (current revision: "
+                + "\(actual.map(String.init) ?? "missing"))."
         case .unknownRun(let id):
             "Export run \(id.uuidString) is not in the store."
         case .unknownPart(let runID, let sequence):
@@ -97,6 +107,14 @@ public actor HozzStore {
 
         if version < 1 {
             try database.transaction {
+                let lockedVersion = try database.query(
+                    "PRAGMA user_version;"
+                ) { row in
+                    Int(row.integer(0))
+                }.first ?? 0
+                guard lockedVersion < 1 else {
+                    return
+                }
                 try database.execute(
                     """
                     CREATE TABLE stream_state (
@@ -151,13 +169,22 @@ public actor HozzStore {
 
         if version < 2 {
             try database.transaction {
+                let lockedVersion = try database.query(
+                    "PRAGMA user_version;"
+                ) { row in
+                    Int(row.integer(0))
+                }.first ?? 0
+                guard lockedVersion < 2 else {
+                    return
+                }
                 try database.execute(
                     """
                     CREATE TABLE destination (
                         id TEXT PRIMARY KEY NOT NULL,
                         payload TEXT NOT NULL,
                         created_at REAL NOT NULL,
-                        updated_at REAL NOT NULL
+                        updated_at REAL NOT NULL,
+                        revision INTEGER NOT NULL DEFAULT 1
                     );
 
                     CREATE TABLE delivery_state (
@@ -195,6 +222,14 @@ public actor HozzStore {
 
         if version < 3 {
             try database.transaction {
+                let lockedVersion = try database.query(
+                    "PRAGMA user_version;"
+                ) { row in
+                    Int(row.integer(0))
+                }.first ?? 0
+                guard lockedVersion < 3 else {
+                    return
+                }
                 // A separate table, not extra columns on `stream_state`, and
                 // that separation is the feature's central safety property
                 // rather than a filing preference. An anchor is the sweep's
@@ -226,12 +261,239 @@ public actor HozzStore {
                 try database.execute("PRAGMA user_version = 3;")
             }
         }
+
+        if version < 4 {
+            try database.transaction {
+                let lockedVersion = try database.query(
+                    "PRAGMA user_version;"
+                ) { row in
+                    Int(row.integer(0))
+                }.first ?? 0
+                guard lockedVersion < 4 else {
+                    return
+                }
+
+                try database.execute(
+                    """
+                    CREATE TABLE canonical_record_version (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        version INTEGER NOT NULL
+                    );
+                    """
+                )
+                let hasExportRuns = try database.query(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = 'export_run';
+                    """
+                ) { _ in true }.first ?? false
+                if hasExportRuns {
+                    try database.execute(
+                        """
+                        INSERT INTO canonical_record_version (id, version)
+                        SELECT '__legacy_export_floor__',
+                               MAX(
+                                   MAX(
+                                       CAST(max_timestamp * 1000 AS INTEGER),
+                                       1
+                                   )
+                               )
+                        FROM (
+                            SELECT MAX(
+                                started_at,
+                                updated_at,
+                                COALESCE(finished_at, started_at)
+                            ) AS max_timestamp
+                            FROM export_run
+                        )
+                        HAVING COUNT(*) > 0;
+                        """
+                    )
+                }
+                try database.execute("PRAGMA user_version = 4;")
+            }
+        }
+
+        if version < 5 {
+            try database.transaction {
+                let lockedVersion = try database.query(
+                    "PRAGMA user_version;"
+                ) { row in
+                    Int(row.integer(0))
+                }.first ?? 0
+                guard lockedVersion < 5 else {
+                    return
+                }
+                let tables = Set(
+                    try database.query(
+                        "SELECT name FROM sqlite_master WHERE type = 'table';"
+                    ) { $0.text(0) }
+                )
+                if tables.contains("export_run") {
+                    let columns = Set(
+                        try database.query("PRAGMA table_info(export_run);") {
+                            $0.text(1)
+                        }
+                    )
+                    if !columns.contains("contract_version") {
+                        try database.execute(
+                            "ALTER TABLE export_run ADD COLUMN contract_version INTEGER;"
+                        )
+                    }
+                }
+                if tables.contains("export_part") {
+                    let columns = Set(
+                        try database.query("PRAGMA table_info(export_part);") {
+                            $0.text(1)
+                        }
+                    )
+                    if !columns.contains("contract_version") {
+                        try database.execute(
+                            "ALTER TABLE export_part ADD COLUMN contract_version INTEGER;"
+                        )
+                    }
+                }
+                try database.execute("PRAGMA user_version = 5;")
+            }
+        }
+
+        if version < 6 {
+            try database.transaction {
+                let lockedVersion = try database.query(
+                    "PRAGMA user_version;"
+                ) { row in
+                    Int(row.integer(0))
+                }.first ?? 0
+                guard lockedVersion < 6 else {
+                    return
+                }
+                try database.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS delivery_omission_seal (
+                        destination_id TEXT NOT NULL
+                            REFERENCES destination(id) ON DELETE CASCADE,
+                        format TEXT NOT NULL,
+                        omitted_record_count INTEGER NOT NULL,
+                        sealed_at REAL NOT NULL,
+                        PRIMARY KEY (destination_id, format)
+                    );
+                    PRAGMA user_version = 6;
+                    """
+                )
+            }
+        }
+
+        if version < 7 {
+            try database.transaction {
+                let lockedVersion = try database.query(
+                    "PRAGMA user_version;"
+                ) { row in
+                    Int(row.integer(0))
+                }.first ?? 0
+                guard lockedVersion < 7 else {
+                    return
+                }
+                let columns = Set(
+                    try database.query("PRAGMA table_info(destination);") {
+                        $0.text(1)
+                    }
+                )
+                if !columns.contains("revision") {
+                    try database.execute(
+                        """
+                        ALTER TABLE destination
+                            ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+                        """
+                    )
+                }
+                try database.execute("PRAGMA user_version = 7;")
+            }
+        }
+
+        if version < 8 {
+            try database.transaction {
+                let lockedVersion = try database.query(
+                    "PRAGMA user_version;"
+                ) { row in
+                    Int(row.integer(0))
+                }.first ?? 0
+                guard lockedVersion < 8 else {
+                    return
+                }
+                // A lossy destination may already have advanced its cursor
+                // before omission seals existed. Mark that historical debt
+                // conservatively so a later edit to NDJSON/JSON replays from
+                // the beginning instead of trusting an incomplete cursor.
+                try database.execute(
+                    """
+                    INSERT OR IGNORE INTO delivery_omission_seal (
+                        destination_id, format, omitted_record_count, sealed_at
+                    )
+                    SELECT destination.id,
+                           json_extract(destination.payload, '$.format'),
+                           1,
+                           destination.updated_at
+                    FROM destination
+                    WHERE CASE WHEN json_valid(destination.payload)
+                              THEN json_extract(destination.payload, '$.format')
+                          END IN ('metrics', 'influx')
+                      AND (
+                        EXISTS (
+                            SELECT 1 FROM stream_state
+                            WHERE scope =
+                                'destination:' || lower(destination.id)
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM prime_state
+                            WHERE scope =
+                                'destination:' || lower(destination.id)
+                        )
+                      );
+                    PRAGMA user_version = 8;
+                    """
+                )
+            }
+        }
     }
 
     public func schemaVersion() throws -> Int {
         try database.query("PRAGMA user_version;") { row in
             Int(row.integer(0))
         }.first ?? 0
+    }
+
+    /// Returns a durable version that cannot move backward with the wall clock.
+    public func nextCanonicalRecordVersion(
+        id: String,
+        observedAt: Date
+    ) throws -> Int64 {
+        try database.transaction {
+            let previous = try database.query(
+                """
+                SELECT MAX(version)
+                FROM canonical_record_version
+                WHERE id IN (?, '__legacy_export_floor__');
+                """,
+                [.text(id)]
+            ) { row in
+                row.integer(0)
+            }.first ?? 0
+            let timestamp = max(
+                Int64(observedAt.timeIntervalSince1970 * 1_000),
+                1
+            )
+            let version = max(previous + 1, timestamp)
+            try database.run(
+                """
+                INSERT INTO canonical_record_version (id, version)
+                VALUES (?, ?)
+                ON CONFLICT(id) DO UPDATE SET version = excluded.version;
+                """,
+                [.text(id), .integer(version)]
+            )
+            return version
+        }
     }
 
     // MARK: - Stream state
@@ -299,14 +561,66 @@ public actor HozzStore {
     public func commit(
         _ commits: [PendingAnchorCommit],
         prime primeCommits: [PendingPrimeCommit],
+        omissionSeal: DeliveryOmissionSeal? = nil,
+        expectedDestinationRevision: Int64? = nil,
         scope: AnchorScope,
         at date: Date = .now
     ) throws {
-        guard !commits.isEmpty || !primeCommits.isEmpty else {
+        guard
+            !commits.isEmpty
+                || !primeCommits.isEmpty
+                || omissionSeal != nil
+        else {
             return
         }
 
         try database.transaction {
+            if let expectedDestinationRevision {
+                guard case .destination(let destinationID) = scope else {
+                    throw HozzStoreError.corruptStoredValue(
+                        "a destination revision was supplied for a non-destination scope"
+                    )
+                }
+                let actual = try destinationRevision(id: destinationID)
+                guard actual == expectedDestinationRevision else {
+                    throw HozzStoreError.staleDestinationConfiguration(
+                        id: destinationID,
+                        expected: expectedDestinationRevision,
+                        actual: actual
+                    )
+                }
+            }
+            if let omissionSeal {
+                guard scope == .destination(omissionSeal.destinationID) else {
+                    throw HozzStoreError.corruptStoredValue(
+                        "an omission seal did not match its destination scope"
+                    )
+                }
+                guard omissionSeal.omittedRecordCount > 0 else {
+                    throw HozzStoreError.corruptStoredValue(
+                        "an omission seal had no omitted records"
+                    )
+                }
+                try database.run(
+                    """
+                    INSERT INTO delivery_omission_seal (
+                        destination_id, format, omitted_record_count, sealed_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(destination_id, format) DO UPDATE SET
+                        omitted_record_count =
+                            delivery_omission_seal.omitted_record_count
+                            + excluded.omitted_record_count,
+                        sealed_at = excluded.sealed_at;
+                    """,
+                    [
+                        .text(omissionSeal.destinationID.uuidString.lowercased()),
+                        .text(omissionSeal.format),
+                        .integer(Int64(omissionSeal.omittedRecordCount)),
+                        .real(date.timeIntervalSince1970)
+                    ]
+                )
+            }
             for commit in commits {
                 try apply(commit, scope: scope, at: date)
             }
@@ -408,7 +722,29 @@ public actor HozzStore {
                 "DELETE FROM prime_state WHERE scope = ?;",
                 [.text(scope.rawValue)]
             )
+            if case .destination(let destinationID) = scope {
+                try database.run(
+                    "DELETE FROM delivery_omission_seal WHERE destination_id = ?;",
+                    [.text(destinationID.uuidString.lowercased())]
+                )
+            }
         }
+    }
+
+    public func deliveryOmissionFormats(
+        for destinationID: UUID
+    ) throws -> Set<String> {
+        Set(
+            try database.query(
+                """
+                SELECT format
+                FROM delivery_omission_seal
+                WHERE destination_id = ?
+                """,
+                [.text(destinationID.uuidString.lowercased())],
+                row: { $0.text(0) }
+            )
+        )
     }
 
     private static func streamRecord(_ row: SQLiteRow) throws -> StreamRecord {
@@ -686,6 +1022,7 @@ public actor HozzStore {
         format: String,
         attemptedTypeCount: Int,
         catalogVersion: String,
+        contractVersion: Int? = HozzArchiveContract.schemaVersion,
         at date: Date = .now
     ) throws -> ExportRunRecord {
         try database.run(
@@ -693,9 +1030,10 @@ public actor HozzStore {
             INSERT INTO export_run (
                 id, state, format, started_at, updated_at, finished_at,
                 record_count, attempted_type_count, catalog_version,
-                sample_encoding_error_count, failure_reason, final_file_name
+                sample_encoding_error_count, failure_reason, final_file_name,
+                contract_version
             )
-            VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, 0, NULL, NULL);
+            VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, 0, NULL, NULL, ?);
             """,
             [
                 .text(id.uuidString.lowercased()),
@@ -704,7 +1042,8 @@ public actor HozzStore {
                 .real(date.timeIntervalSince1970),
                 .real(date.timeIntervalSince1970),
                 .integer(Int64(attemptedTypeCount)),
-                .text(catalogVersion)
+                .text(catalogVersion),
+                contractVersion.map { .integer(Int64($0)) } ?? .null
             ]
         )
         guard let record = try run(id: id) else {
@@ -718,7 +1057,8 @@ public actor HozzStore {
             """
             SELECT id, state, format, started_at, updated_at, finished_at,
                    record_count, attempted_type_count, catalog_version,
-                   sample_encoding_error_count, failure_reason, final_file_name
+                   sample_encoding_error_count, failure_reason, final_file_name,
+                   contract_version
             FROM export_run WHERE id = ?;
             """,
             [.text(id.uuidString.lowercased())],
@@ -731,7 +1071,8 @@ public actor HozzStore {
             """
             SELECT id, state, format, started_at, updated_at, finished_at,
                    record_count, attempted_type_count, catalog_version,
-                   sample_encoding_error_count, failure_reason, final_file_name
+                   sample_encoding_error_count, failure_reason, final_file_name,
+                   contract_version
             FROM export_run ORDER BY started_at DESC;
             """,
             row: Self.runRecord
@@ -744,7 +1085,8 @@ public actor HozzStore {
             """
             SELECT id, state, format, started_at, updated_at, finished_at,
                    record_count, attempted_type_count, catalog_version,
-                   sample_encoding_error_count, failure_reason, final_file_name
+                   sample_encoding_error_count, failure_reason, final_file_name,
+                   contract_version
             FROM export_run
             WHERE state IN (?, ?)
             ORDER BY started_at DESC
@@ -857,7 +1199,8 @@ public actor HozzStore {
             catalogVersion: row.text(8),
             sampleEncodingErrorCount: Int(row.integer(9)),
             failureReason: row.optionalText(10),
-            finalFileName: row.optionalText(11)
+            finalFileName: row.optionalText(11),
+            contractVersion: row.optionalInteger(12).map(Int.init)
         )
     }
 
@@ -881,16 +1224,17 @@ public actor HozzStore {
             INSERT INTO export_part (
                 run_id, sequence, file_name, state, byte_count,
                 uncompressed_byte_count, crc32, record_count,
-                created_at, sealed_at
+                created_at, sealed_at, contract_version
             )
-            VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?, NULL);
+            VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?, NULL, ?);
             """,
             [
                 .text(runID.uuidString.lowercased()),
                 .integer(Int64(sequence)),
                 .text(fileName),
                 .text(ExportPartState.open.rawValue),
-                .real(date.timeIntervalSince1970)
+                .real(date.timeIntervalSince1970),
+                run.contractVersion.map { .integer(Int64($0)) } ?? .null
             ]
         )
         guard let part = try self.part(runID: runID, sequence: sequence) else {
@@ -904,7 +1248,7 @@ public actor HozzStore {
             """
             SELECT run_id, sequence, file_name, state, byte_count,
                    uncompressed_byte_count, crc32, record_count,
-                   created_at, sealed_at
+                   created_at, sealed_at, contract_version
             FROM export_part WHERE run_id = ? AND sequence = ?;
             """,
             [.text(runID.uuidString.lowercased()), .integer(Int64(sequence))],
@@ -955,12 +1299,29 @@ public actor HozzStore {
         .sorted()
     }
 
+    /// Part contract versions without decoding any other part state.
+    ///
+    /// Resume checks this before opening or discarding a part, because a legacy
+    /// part cannot be appended to a current run even if the run row itself was
+    /// already upgraded.
+    public func partContractVersions(runID: UUID) throws -> [Int?] {
+        try database.query(
+            """
+            SELECT contract_version FROM export_part
+            WHERE run_id = ? ORDER BY sequence;
+            """,
+            [.text(runID.uuidString.lowercased())]
+        ) { row in
+            row.optionalInteger(0).map(Int.init)
+        }
+    }
+
     public func parts(runID: UUID) throws -> [ExportPartRecord] {
         try database.query(
             """
             SELECT run_id, sequence, file_name, state, byte_count,
                    uncompressed_byte_count, crc32, record_count,
-                   created_at, sealed_at
+                   created_at, sealed_at, contract_version
             FROM export_part WHERE run_id = ? ORDER BY sequence;
             """,
             [.text(runID.uuidString.lowercased())],
@@ -1033,7 +1394,7 @@ public actor HozzStore {
             """
             SELECT run_id, sequence, file_name, state, byte_count,
                    uncompressed_byte_count, crc32, record_count,
-                   created_at, sealed_at
+                   created_at, sealed_at, contract_version
             FROM export_part WHERE run_id = ? AND state = ?;
             """,
             [
@@ -1069,6 +1430,9 @@ public actor HozzStore {
         recordCount: Int,
         at date: Date = .now
     ) throws {
+        guard let contractVersion = try run(id: runID)?.contractVersion else {
+            throw HozzStoreError.unknownRun(runID)
+        }
         try database.transaction {
             try database.run(
                 "DELETE FROM export_part WHERE run_id = ?;",
@@ -1079,9 +1443,9 @@ public actor HozzStore {
                 INSERT INTO export_part (
                     run_id, sequence, file_name, state, byte_count,
                     uncompressed_byte_count, crc32, record_count,
-                    created_at, sealed_at
+                    created_at, sealed_at, contract_version
                 )
-                VALUES (?, 0, ?, ?, ?, 0, 0, ?, ?, ?);
+                VALUES (?, 0, ?, ?, ?, 0, 0, ?, ?, ?, ?);
                 """,
                 [
                     .text(runID.uuidString.lowercased()),
@@ -1090,7 +1454,8 @@ public actor HozzStore {
                     .integer(Int64(bitPattern: byteCount)),
                     .integer(Int64(recordCount)),
                     .real(date.timeIntervalSince1970),
-                    .real(date.timeIntervalSince1970)
+                    .real(date.timeIntervalSince1970),
+                    .integer(Int64(contractVersion))
                 ]
             )
             try database.run(
@@ -1148,7 +1513,8 @@ public actor HozzStore {
             crc32: UInt32(truncatingIfNeeded: row.integer(6)),
             recordCount: Int(row.integer(7)),
             createdAt: Date(timeIntervalSince1970: row.real(8)),
-            sealedAt: row.optionalReal(9).map(Date.init(timeIntervalSince1970:))
+            sealedAt: row.optionalReal(9).map(Date.init(timeIntervalSince1970:)),
+            contractVersion: row.optionalInteger(10).map(Int.init)
         )
     }
 }

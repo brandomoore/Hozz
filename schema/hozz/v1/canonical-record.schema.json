@@ -1,0 +1,672 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hozz.brando.page/schema/hozz/v1/canonical-record.schema.json",
+  "title": "Hozz canonical record",
+  "description": "The versioned, lossless record carried in a Hozz NDJSON archive. Run-level records share the stream and are distinguished by kind.",
+  "x-hozz-run-kind-properties": {
+    "manifest": [
+      "run",
+      "createdAt"
+    ],
+    "resume": [
+      "run",
+      "resumedAt",
+      "records"
+    ],
+    "typeSummary": [
+      "type",
+      "records",
+      "state"
+    ],
+    "typeError": [
+      "type",
+      "message"
+    ],
+    "typeCoverage": [
+      "type",
+      "state",
+      "complete",
+      "observedAt",
+      "deliveredCount",
+      "primedFrom",
+      "primedThrough"
+    ],
+    "completion": [
+      "run",
+      "completedAt",
+      "records"
+    ]
+  },
+  "x-hozz-canonical-common-properties": [
+    "canonicalId",
+    "canonicalType",
+    "deleted",
+    "device",
+    "id",
+    "kind",
+    "lineage",
+    "metadata",
+    "recordVersion",
+    "schemaVersion",
+    "source",
+    "sourceRecord",
+    "type"
+  ],
+  "x-hozz-canonical-kind-properties": {
+    "quantity": ["startDate", "endDate", "quantity"],
+    "category": ["startDate", "endDate", "value"],
+    "workout": ["startDate", "endDate", "activityType"],
+    "deletion": [],
+    "audiogram": ["startDate", "endDate"],
+    "characteristics": ["readAt", "characteristics"],
+    "clinicalRecord": ["startDate", "endDate"],
+    "correlation": ["startDate", "endDate"],
+    "electrocardiogram": ["startDate", "endDate"],
+    "electrocardiogramEnd": [
+      "startDate",
+      "endDate",
+      "parentCanonicalId"
+    ],
+    "electrocardiogramVoltages": [
+      "startDate",
+      "endDate",
+      "parentCanonicalId",
+      "sequence"
+    ],
+    "medicationDose": ["startDate", "endDate"],
+    "quantitySeriesEnd": [
+      "startDate",
+      "endDate",
+      "parentCanonicalId"
+    ],
+    "quantitySeriesReadings": [
+      "startDate",
+      "endDate",
+      "parentCanonicalId",
+      "sequence"
+    ],
+    "sampleEncodingError": [
+      "message",
+      "parentCanonicalId",
+      "resolutionCanonicalId"
+    ],
+    "sample": ["startDate", "endDate"],
+    "stateOfMind": ["startDate", "endDate"],
+    "workoutRoute": ["startDate", "endDate"],
+    "workoutRouteEnd": [
+      "startDate",
+      "endDate",
+      "parentCanonicalId"
+    ],
+    "workoutRouteLocations": [
+      "startDate",
+      "endDate",
+      "parentCanonicalId",
+      "sequence"
+    ]
+  },
+  "type": "object",
+  "required": [
+    "kind",
+    "schemaVersion"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "canonicalId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+:.+$",
+      "description": "Must equal sourceRecord.store + ':' + the top-level id. Consumers MUST reject a mismatch."
+    },
+    "canonicalType": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parentCanonicalId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+:.+$",
+      "description": "For parented series and encoding-error kinds, must equal sourceRecord.store + ':' + sourceRecord.id."
+    },
+    "resolutionCanonicalId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+:.+$",
+      "description": "Optional explicit completion record whose successful arrival resolves this error. It must use the sourceRecord.store namespace."
+    },
+    "recordVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deleted": {
+      "type": "boolean"
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run": {
+      "type": "string",
+      "minLength": 1
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resumedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "primedFrom": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "primedThrough": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "deliveredCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "records": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "startDate": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "endDate": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "readAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "value": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "activityType": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "characteristics": {
+      "type": "object"
+    },
+    "quantity": {
+      "type": "object",
+      "required": [
+        "unit",
+        "value"
+      ],
+      "properties": {
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "number"
+        },
+        "canonical": {
+          "$ref": "#/$defs/valueAndUnit"
+        },
+        "original": {
+          "$ref": "#/$defs/sourceValue"
+        }
+      },
+      "additionalProperties": true
+    },
+    "sourceRecord": {
+      "type": "object",
+      "required": [
+        "store",
+        "id",
+        "type"
+      ],
+      "properties": {
+        "store": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "lineage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "store"
+        ],
+        "properties": {
+          "store": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]+$"
+          },
+          "package": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recordId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "bundleIdentifier": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "valueAndUnit": {
+      "type": "object",
+      "required": [
+        "unit",
+        "value"
+      ],
+      "properties": {
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "number"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "sourceValue": {
+      "type": "object",
+      "properties": {
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "number"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "manifest",
+              "resume",
+              "typeSummary",
+              "typeError",
+              "typeCoverage",
+              "completion"
+            ]
+          }
+        }
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "manifest"
+              }
+            },
+            "required": [
+              "run",
+              "createdAt"
+            ]
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "resume"
+              }
+            },
+            "required": [
+              "run",
+              "resumedAt"
+            ]
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "typeSummary"
+              }
+            },
+            "required": [
+              "type",
+              "state"
+            ]
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "typeError"
+              }
+            },
+            "required": [
+              "type",
+              "message"
+            ]
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "typeCoverage"
+              }
+            },
+            "required": [
+              "type",
+              "state",
+              "complete",
+              "observedAt"
+            ]
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "completion"
+              }
+            },
+            "required": [
+              "run",
+              "completedAt",
+              "records"
+            ]
+          }
+        ]
+      },
+      "else": {
+        "required": [
+          "canonicalId",
+          "canonicalType",
+          "id",
+          "recordVersion",
+          "type",
+          "sourceRecord",
+          "lineage"
+        ],
+        "properties": {
+          "lineage": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "not": {
+              "enum": [
+                "manifest",
+                "resume",
+                "typeSummary",
+                "typeError",
+                "typeCoverage",
+                "completion",
+                "deletion",
+                "characteristics",
+                "sampleEncodingError"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "startDate",
+          "endDate"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "quantity"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "quantity"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "category"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "workout"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "activityType"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "characteristics"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "readAt",
+          "characteristics"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "sampleEncodingError"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "message",
+          "parentCanonicalId"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "electrocardiogramEnd",
+              "electrocardiogramVoltages",
+              "quantitySeriesEnd",
+              "quantitySeriesReadings",
+              "workoutRouteEnd",
+              "workoutRouteLocations"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "parentCanonicalId"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "electrocardiogramVoltages",
+              "quantitySeriesReadings",
+              "workoutRouteLocations"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "sequence"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "workoutRouteEnd",
+              "workoutRouteLocations"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "type": {
+            "const": "HKWorkoutRouteTypeIdentifier"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "electrocardiogramEnd",
+              "electrocardiogramVoltages"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "type": {
+            "const": "HKDataTypeIdentifierElectrocardiogram"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "quantitySeriesEnd",
+              "quantitySeriesReadings"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "type": {
+            "not": {
+              "enum": [
+                "HKWorkoutRouteTypeIdentifier",
+                "HKDataTypeIdentifierElectrocardiogram"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

@@ -287,6 +287,7 @@ public struct ExportRunRecord: Equatable, Sendable {
     public let sampleEncodingErrorCount: Int
     public let failureReason: String?
     public let finalFileName: String?
+    public let contractVersion: Int?
 
     public init(
         id: UUID,
@@ -300,7 +301,8 @@ public struct ExportRunRecord: Equatable, Sendable {
         catalogVersion: String,
         sampleEncodingErrorCount: Int,
         failureReason: String?,
-        finalFileName: String?
+        finalFileName: String?,
+        contractVersion: Int? = nil
     ) {
         self.id = id
         self.state = state
@@ -314,6 +316,7 @@ public struct ExportRunRecord: Equatable, Sendable {
         self.sampleEncodingErrorCount = sampleEncodingErrorCount
         self.failureReason = failureReason
         self.finalFileName = finalFileName
+        self.contractVersion = contractVersion
     }
 }
 
@@ -328,6 +331,7 @@ public struct ExportPartRecord: Equatable, Sendable {
     public let recordCount: Int
     public let createdAt: Date
     public let sealedAt: Date?
+    public let contractVersion: Int?
 
     public init(
         runID: UUID,
@@ -339,7 +343,8 @@ public struct ExportPartRecord: Equatable, Sendable {
         crc32: UInt32 = 0,
         recordCount: Int,
         createdAt: Date,
-        sealedAt: Date?
+        sealedAt: Date?,
+        contractVersion: Int? = nil
     ) {
         self.runID = runID
         self.sequence = sequence
@@ -351,6 +356,7 @@ public struct ExportPartRecord: Equatable, Sendable {
         self.recordCount = recordCount
         self.createdAt = createdAt
         self.sealedAt = sealedAt
+        self.contractVersion = contractVersion
     }
 }
 
@@ -383,5 +389,28 @@ public struct PendingAnchorCommit: Equatable, Sendable {
         self.addedObservedCount = addedObservedCount
         self.anchorClosedAt = anchorClosedAt
         self.failureReason = failureReason
+    }
+}
+
+/// A durable acknowledgement that a lossy destination intentionally omitted
+/// records while advancing its acquisition cursors.
+///
+/// The exact format is part of the seal because changing that format can make
+/// the omitted records representable. A later lossless edit uses this marker to
+/// replay the destination instead of trusting cursors advanced under narrower
+/// semantics.
+public struct DeliveryOmissionSeal: Equatable, Sendable {
+    public let destinationID: UUID
+    public let format: String
+    public let omittedRecordCount: Int
+
+    public init(
+        destinationID: UUID,
+        format: String,
+        omittedRecordCount: Int
+    ) {
+        self.destinationID = destinationID
+        self.format = format
+        self.omittedRecordCount = omittedRecordCount
     }
 }

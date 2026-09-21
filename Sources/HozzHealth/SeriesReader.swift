@@ -179,16 +179,25 @@ public actor SeriesReader<Backend: SeriesBackend> {
                 // honest option: its header is already in the export, so saying
                 // nothing would leave a recording that simply stops.
                 live = nil
+                let failureID = HealthSampleEncoder.encodingFailureID(
+                    sourceRecordID: sampleID,
+                    typeIdentifier: shape.typeIdentifier
+                )
                 return HealthChangeBatch(
                     changes: [
                         .upsert(
                             CapturedHealthObject(
-                                id: sampleID,
+                                id: failureID,
                                 type: shape.typeKey,
                                 canonicalPayload: try encoder.encodeEncodingFailure(
                                     id: sampleID,
                                     typeIdentifier: shape.typeIdentifier,
-                                    message: "The sample changed in Health while it was being read."
+                                    message: "The sample changed in Health while it was being read.",
+                                    resolutionCanonicalID:
+                                        SeriesEncoding.completionCanonicalID(
+                                            shape: shape,
+                                            sample: sampleID
+                                        )
                                 )
                             )
                         )

@@ -1,5 +1,6 @@
 import Foundation
 @testable import HozzDeliver
+@testable import HozzReceive
 import XCTest
 
 /// Covers the opt-in schema that matches another exporter's field names, and
@@ -103,9 +104,34 @@ final class HealthAutoExportTests: XCTestCase {
     func testAnOrdinaryPointCarriesQtyAndSource() throws {
         let point = try firstPoint([record()])
 
+        XCTAssertEqual(point["id"] as? String, "abc-123")
         XCTAssertEqual(point["qty"] as? Double, 8_500)
         XCTAssertEqual(point["source"] as? String, "iPhone")
         XCTAssertNil(point["Avg"])
+    }
+
+    func testARecordWithoutACompatibleValueFailsBeforeDelivery() {
+        let unsupported = record(
+            type: "HKDataTypeStateOfMind",
+            kind: "stateOfMind",
+            value: nil,
+            unit: nil
+        )
+
+        XCTAssertThrowsError(
+            try HealthAutoExportPayloadBuilder.build(
+                records: [unsupported],
+                timeZone: timeZone
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? HealthAutoExportPayloadError,
+                .unsupportedRecord(
+                    kind: "stateOfMind",
+                    type: "HKDataTypeStateOfMind"
+                )
+            )
+        }
     }
 
     /// Their heart rate points carry a range, with capitalised keys, and no
@@ -168,11 +194,13 @@ final class HealthAutoExportTests: XCTestCase {
         )
         let point = try XCTUnwrap((metric["data"] as? [[String: Any]])?.first)
 
+        XCTAssertEqual(point["id"] as? String, "abc-123")
         XCTAssertEqual(metric["units"] as? String, "hr")
         XCTAssertEqual(point["startDate"] as? String, "2026-02-05 23:00:00 -0800")
         XCTAssertEqual(point["endDate"] as? String, "2026-02-06 00:30:00 -0800")
         XCTAssertEqual(point["qty"] as? Double, 1.5, "Their sleep quantities are hours.")
         XCTAssertEqual(point["value"] as? String, "Core")
+        XCTAssertEqual(point["rawValue"] as? Double, 3)
         XCTAssertNil(point["date"], "Their unaggregated sleep points have no date key.")
     }
 
@@ -193,6 +221,22 @@ final class HealthAutoExportTests: XCTestCase {
             "Unspecified",
             "A stage this build has no name for is still reported honestly."
         )
+    }
+
+    func testAnUnknownSleepStageCarriesItsRawValue() throws {
+        let point = try firstPoint([
+            record(
+                type: "HKCategoryTypeIdentifierSleepAnalysis",
+                kind: "category",
+                value: 99,
+                unit: nil,
+                start: "2026-02-06T07:00:00.000Z",
+                end: "2026-02-06T08:30:00.000Z"
+            )
+        ])
+
+        XCTAssertEqual(point["value"] as? String, "Unspecified")
+        XCTAssertEqual(point["rawValue"] as? Double, 99)
     }
 
     // MARK: - Workouts
@@ -276,8 +320,69 @@ final class HealthAutoExportTests: XCTestCase {
         )
 
         XCTAssertNotEqual(hozz, compatible)
+        XCTAssertTrue(String(decoding: hozz, as: UTF8.self).contains("\"id\":\"abc-123\""))
         XCTAssertTrue(String(decoding: hozz, as: UTF8.self).contains("\"qty\""))
         XCTAssertTrue(String(decoding: compatible, as: UTF8.self).contains("\"Avg\""))
+    }
+
+    func testHozzMetricsRoundTripEveryRepresentableKind() throws {
+        let records = [
+            record(),
+            record(
+                type: "HKCategoryTypeIdentifierSleepAnalysis",
+                kind: "category",
+                value: 5,
+                unit: nil,
+                start: "2026-02-06T07:00:00.000Z",
+                end: "2026-02-06T08:30:00.000Z",
+                identifier: "sleep"
+            ),
+            record(
+                type: "HKWorkoutTypeIdentifier",
+                kind: "workout",
+                value: nil,
+                unit: nil,
+                identifier: "workout",
+                duration: 1_800,
+                activityType: 37
+            ),
+            record(
+                value: nil,
+                unit: nil,
+                identifier: "deleted",
+                isDeletion: true
+            )
+        ]
+
+        let parsed = try BatchParser.parse(
+            try CompatiblePayloadBuilder.build(records: records)
+        )
+
+        XCTAssertEqual(parsed.records.map(\.id), ["sleep", "abc-123", "workout"])
+        XCTAssertEqual(parsed.records.map(\.value), [5, 8_500, 1_800])
+        XCTAssertEqual(parsed.deletions.map(\.id), ["deleted"])
+        XCTAssertEqual(parsed.unreadableCount, 0)
+    }
+
+    func testHozzMetricsRejectANonNumericKindInsteadOfEmittingAnInvalidPoint() {
+        let unsupported = record(
+            type: "HKDataTypeStateOfMind",
+            kind: "stateOfMind",
+            value: nil,
+            unit: nil
+        )
+
+        XCTAssertThrowsError(
+            try CompatiblePayloadBuilder.build(records: [unsupported])
+        ) { error in
+            XCTAssertEqual(
+                error as? CompatiblePayloadError,
+                .unsupportedRecord(
+                    kind: "stateOfMind",
+                    type: "HKDataTypeStateOfMind"
+                )
+            )
+        }
     }
 
     func testTheChosenSchemaSurvivesBeingSaved() throws {

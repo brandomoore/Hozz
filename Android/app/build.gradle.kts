@@ -1,0 +1,101 @@
+import org.gradle.api.tasks.Exec
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+android {
+    namespace = "com.thatcube.hozz"
+    compileSdk = 37
+
+    defaultConfig {
+        applicationId = "com.thatcube.hozz"
+        minSdk = 28
+        targetSdk = 36
+        versionCode = providers.gradleProperty("hozzVersionCode")
+            .orElse("10001").get().toInt().also {
+                require(it in 1..2_100_000_000) { "Invalid Hozz version code." }
+            }
+        versionName = providers.gradleProperty("hozzVersionName")
+            .orElse("0.1.0-beta.1").get().also {
+                require(it.matches(Regex("[0-9]+\\.[0-9]+\\.[0-9]+-beta\\.[0-9]+"))) {
+                    "Hozz preview version must use major.minor.patch-beta.number."
+                }
+            }
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            isDebuggable = false
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    testOptions {
+        unitTests.all {
+            it.useJUnit()
+        }
+    }
+
+    sourceSets {
+        getByName("test").resources.setSrcDirs(listOf("../../schema"))
+        getByName("androidTest").assets.setSrcDirs(listOf("../../schema"))
+    }
+
+    packaging {
+        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+}
+
+val verifyGeneratedContracts = tasks.register<Exec>("verifyGeneratedContracts") {
+    workingDir(rootProject.projectDir.parentFile)
+    commandLine("python3", "tools/generate-shared-contracts.py", "--check")
+}
+
+val verifyLauncherIcon = tasks.register<Exec>("verifyLauncherIcon") {
+    workingDir(rootProject.projectDir.parentFile)
+    commandLine("python3", "tools/android-beta-icon.py", "--check")
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(verifyGeneratedContracts, verifyLauncherIcon)
+}
+
+dependencies {
+    implementation(platform("androidx.compose:compose-bom:2026.08.00"))
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.health.connect:connect-client:1.1.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.10.0")
+
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.4.10")
+    testImplementation("com.networknt:json-schema-validator:3.0.7")
+
+    androidTestImplementation("androidx.test:core:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2026.08.00"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+}

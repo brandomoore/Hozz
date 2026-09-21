@@ -857,10 +857,27 @@ final class QuantitySeriesTests: XCTestCase {
         )
         XCTAssertEqual(
             upsert.id,
-            SeriesEncoding.identifier(
-                shape: QuantitySeriesEncoding.shape(for: heartRate.rawValue),
-                sample: sample,
-                suffix: "error"
+            HealthSampleEncoder.encodingFailureID(
+                sourceRecordID: sample,
+                typeIdentifier: heartRate.rawValue
+            )
+        )
+        XCTAssertEqual(
+            object["canonicalId"] as? String,
+            "apple.healthkit:\(upsert.id.uuidString.lowercased())"
+        )
+        XCTAssertEqual(
+            object["parentCanonicalId"] as? String,
+            "apple.healthkit:\(sample.uuidString.lowercased())"
+        )
+        XCTAssertEqual(object["recordVersion"] as? Int, 3)
+        XCTAssertEqual(
+            object["resolutionCanonicalId"] as? String,
+            SeriesEncoding.completionCanonicalID(
+                shape: QuantitySeriesEncoding.shape(
+                    for: heartRate.rawValue
+                ),
+                sample: sample
             )
         )
     }
@@ -1438,18 +1455,17 @@ final class QuantitySeriesTests: XCTestCase {
             sampleEnd: base.addingTimeInterval(30)
         )
         let object = try object(change)
-        XCTAssertEqual(
-            Set(object.keys),
-            [
-                "kind", "schemaVersion", "id", "type", "sample", "sequence",
-                "offset", "count", "startDate", "endDate", "voltages"
-            ],
-            """
-            A caller that passes no extra fields must get exactly the record \
-            it got before, or every electrocardiogram page already delivered \
-            stops matching the one that replaces it.
-            """
+        let legacyFields: Set<String> = [
+            "kind", "schemaVersion", "id", "type", "sample", "sequence",
+            "offset", "count", "startDate", "endDate", "voltages"
+        ]
+        XCTAssertTrue(
+            legacyFields.isSubset(of: Set(object.keys)),
+            "Canonical envelope fields may be added, but existing fields cannot disappear."
         )
+        XCTAssertNotNil(object["canonicalId"] as? String)
+        XCTAssertNotNil(object["canonicalType"] as? String)
+        XCTAssertNotNil(object["parentCanonicalId"] as? String)
     }
 
     func testAPageFieldCannotDisplaceTheShapesOwnMeaning() throws {

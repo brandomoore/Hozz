@@ -40,6 +40,96 @@ final class HozzStoreTests: XCTestCase {
         XCTAssertEqual(reopened, version)
     }
 
+    func testCanonicalRecordVersionSurvivesClockRollbackAndReopen() async throws {
+        let first = try await makeStore()
+        let initial = try await first.nextCanonicalRecordVersion(
+            id: "apple.healthkit:characteristics",
+            observedAt: Date(timeIntervalSince1970: 100)
+        )
+        let rollback = try await first.nextCanonicalRecordVersion(
+            id: "apple.healthkit:characteristics",
+            observedAt: Date(timeIntervalSince1970: 50)
+        )
+        await first.close()
+
+        let reopened = try await makeStore()
+        let afterReopen = try await reopened.nextCanonicalRecordVersion(
+            id: "apple.healthkit:characteristics",
+            observedAt: Date(timeIntervalSince1970: 25)
+        )
+
+        XCTAssertEqual(initial, 100_000)
+        XCTAssertEqual(rollback, initial + 1)
+        XCTAssertEqual(afterReopen, rollback + 1)
+    }
+
+    func testVersionFourMigrationStartsAbovePriorExportTime() async throws {
+        let first = try await makeStore()
+        let databaseURL = await first.databaseURL
+        await first.close()
+        let legacy = try SQLiteDatabase(url: databaseURL)
+        try legacy.transaction {
+            try legacy.execute("DROP TABLE canonical_record_version;")
+            try legacy.run(
+                """
+                INSERT INTO export_run
+                    (id, state, format, started_at, updated_at, finished_at,
+                     record_count, attempted_type_count, catalog_version,
+                     sample_encoding_error_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                [
+                    .text(UUID().uuidString),
+                    .text("running"),
+                    .text("ndjson"),
+                    .real(202),
+                    .real(100),
+                    .null,
+                    .integer(0),
+                    .integer(0),
+                    .text("test"),
+                    .integer(0)
+                ]
+            )
+            try legacy.execute("PRAGMA user_version = 3;")
+        }
+        legacy.close()
+
+        let migrated = try await makeStore()
+        let version = try await migrated.nextCanonicalRecordVersion(
+            id: "apple.healthkit:characteristics",
+            observedAt: Date(timeIntervalSince1970: 100)
+        )
+
+        XCTAssertEqual(version, 202_001)
+    }
+
+    func testConcurrentFreshMigrationsAreIdempotent() async throws {
+        let storeDirectory = directory.url.appending(path: "store")
+
+        let stores = try await withThrowingTaskGroup(
+            of: HozzStore.self,
+            returning: [HozzStore].self
+        ) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    try HozzStore(directory: storeDirectory)
+                }
+            }
+            var opened: [HozzStore] = []
+            for try await store in group {
+                opened.append(store)
+            }
+            return opened
+        }
+
+        for store in stores {
+            let version = try await store.schemaVersion()
+            XCTAssertEqual(version, 8)
+            await store.close()
+        }
+    }
+
     func testDatabaseAndSideFilesAreExcludedFromBackup() async throws {
         let store = try await makeStore()
         // Force a write so SQLite creates its write-ahead log beside the file.
@@ -214,6 +304,208 @@ final class HozzStoreTests: XCTestCase {
             "A rolled back transaction must not leave the healthy commit behind."
         )
         XCTAssertNil(heartRecord)
+    }
+
+    func testOmissionSealRollsBackWithAFailedCursorTransaction() async throws {
+        let store = try await makeStore()
+        let destinationID = UUID()
+        let scope = AnchorScope.destination(destinationID)
+        _ = try await store.saveDestination(
+            id: destinationID,
+            payload: Data("{}".utf8),
+            createdAt: .now
+        )
+        try await store.commit(
+            [
+                PendingAnchorCommit(
+                    type: steps,
+                    baseAnchor: nil,
+                    anchor: anchor("a1"),
+                    coverage: .draining,
+                    addedRecordCount: 1,
+                    addedObservedCount: 1
+                )
+            ],
+            scope: scope
+        )
+
+        do {
+            try await store.commit(
+                [
+                    PendingAnchorCommit(
+                        type: steps,
+                        baseAnchor: anchor("a1"),
+                        anchor: anchor("a2"),
+                        coverage: .draining,
+                        addedRecordCount: 1,
+                        addedObservedCount: 1
+                    ),
+                    PendingAnchorCommit(
+                        type: heartRate,
+                        baseAnchor: anchor("wrong"),
+                        anchor: anchor("bad"),
+                        coverage: .draining,
+                        addedRecordCount: 1,
+                        addedObservedCount: 1
+                    )
+                ],
+                prime: [],
+                omissionSeal: DeliveryOmissionSeal(
+                    destinationID: destinationID,
+                    format: "metrics",
+                    omittedRecordCount: 1
+                ),
+                scope: scope
+            )
+            XCTFail("The stale cursor must roll back the omission seal too.")
+        } catch HozzStoreError.staleBaseAnchor {
+            // Expected.
+        }
+
+        let stored = try await store.streamRecord(scope: scope, type: steps)
+        let omissionFormats = try await store.deliveryOmissionFormats(
+            for: destinationID
+        )
+        XCTAssertEqual(stored?.committedAnchor, anchor("a1"))
+        XCTAssertTrue(omissionFormats.isEmpty)
+    }
+
+    func testStaleDestinationRevisionRejectsCursorAndOmissionTogether()
+        async throws
+    {
+        let store = try await makeStore()
+        let destinationID = UUID()
+        let scope = AnchorScope.destination(destinationID)
+        let first = try await store.saveDestination(
+            id: destinationID,
+            payload: Data(#"{"format":"metrics"}"#.utf8),
+            createdAt: .now
+        )
+        let second = try await store.saveDestination(
+            id: destinationID,
+            payload: Data(#"{"format":"ndjson"}"#.utf8),
+            createdAt: .now
+        )
+        XCTAssertEqual(first.revision, 1)
+        XCTAssertEqual(second.revision, 2)
+
+        do {
+            try await store.commit(
+                [
+                    PendingAnchorCommit(
+                        type: steps,
+                        baseAnchor: nil,
+                        anchor: anchor("stale"),
+                        coverage: .draining,
+                        addedRecordCount: 1,
+                        addedObservedCount: 1
+                    )
+                ],
+                prime: [],
+                omissionSeal: DeliveryOmissionSeal(
+                    destinationID: destinationID,
+                    format: "metrics",
+                    omittedRecordCount: 1
+                ),
+                expectedDestinationRevision: first.revision,
+                scope: scope
+            )
+            XCTFail("A stale destination snapshot must not advance its cursor.")
+        } catch HozzStoreError.staleDestinationConfiguration(
+            let id,
+            let expected,
+            let actual
+        ) {
+            XCTAssertEqual(id, destinationID)
+            XCTAssertEqual(expected, first.revision)
+            XCTAssertEqual(actual, second.revision)
+        }
+
+        let anchor = try await store.committedAnchor(scope: scope, type: steps)
+        let formats = try await store.deliveryOmissionFormats(
+            for: destinationID
+        )
+        XCTAssertNil(anchor)
+        XCTAssertTrue(formats.isEmpty)
+    }
+
+    func testStaleDestinationRevisionRejectsStateAndReceiptWrites() async throws {
+        let store = try await makeStore()
+        let id = UUID()
+        let original = try await store.saveDestination(
+            id: id,
+            payload: Data(#"{"format":"metrics"}"#.utf8),
+            createdAt: .now
+        )
+        let current = try await store.saveDestination(
+            id: id,
+            payload: Data(#"{"format":"ndjson"}"#.utf8),
+            createdAt: .now
+        )
+        let state = DeliveryStateRecord(
+            destinationID: id,
+            state: "idle",
+            deliveredRecords: 7
+        )
+        let receipt = DeliveryReceiptRecord(
+            destinationID: id,
+            attemptedAt: Date(timeIntervalSince1970: 1),
+            recordCount: 7,
+            byteCount: 70,
+            state: "delivered",
+            detail: nil,
+            artifactName: nil
+        )
+        try await store.saveDeliveryState(
+            state,
+            expectedDestinationRevision: current.revision
+        )
+        try await store.appendReceipt(
+            receipt,
+            expectedDestinationRevision: current.revision
+        )
+        try await store.validateDestinationRevision(
+            id: id,
+            expectedRevision: current.revision
+        )
+
+        for deleted in [false, true] {
+            if deleted {
+                try await store.deleteDestination(id: id)
+            }
+            let expectedActual: Int64? = deleted ? nil : current.revision
+            do {
+                try await store.saveDeliveryState(
+                    DeliveryStateRecord(destinationID: id, state: "retrying"),
+                    expectedDestinationRevision: original.revision
+                )
+                XCTFail("A stale state write must fail, including after deletion.")
+            } catch HozzStoreError.staleDestinationConfiguration(
+                let failedID, let expected, let actual
+            ) {
+                XCTAssertEqual(failedID, id)
+                XCTAssertEqual(expected, original.revision)
+                XCTAssertEqual(actual, expectedActual)
+            }
+            do {
+                try await store.appendReceipt(
+                    receipt,
+                    keeping: 0,
+                    expectedDestinationRevision: original.revision
+                )
+                XCTFail("A stale receipt must neither insert nor prune history.")
+            } catch HozzStoreError.staleDestinationConfiguration(
+                let failedID, let expected, let actual
+            ) {
+                XCTAssertEqual(failedID, id)
+                XCTAssertEqual(expected, original.revision)
+                XCTAssertEqual(actual, expectedActual)
+            }
+            let savedState = try await store.deliveryState(for: id)
+            let receipts = try await store.receipts(for: id)
+            XCTAssertEqual(savedState, deleted ? nil : state)
+            XCTAssertEqual(receipts, deleted ? [] : [receipt])
+        }
     }
 
     func testScopesDoNotShareAnchors() async throws {

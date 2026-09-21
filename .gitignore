@@ -21,11 +21,18 @@ Package.resolved
 .env
 .env.*
 *.p8
+*.p12
+*.jks
+*.keystore
+*.mobileprovision
+*.provisionprofile
 selfIdentity.plist
 *.xcconfig.local
 
 # Editors
 *.swp
+__pycache__/
+*.pyc
 
 # Local signing settings; never committed.
 Local.xcconfig

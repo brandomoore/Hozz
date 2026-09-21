@@ -63,6 +63,7 @@ public actor HealthReceiver {
     public static let serviceType = HozzService.bonjourType
 
     private let store: IngestStore
+    private let ingestBatch: @Sendable (ParsedBatch, String?) async throws -> IngestResult
     private var token: String
     private let serviceName: String
     private var pairedDevices: [PairedDevice] = []
@@ -90,6 +91,21 @@ public actor HealthReceiver {
         self.token = token
         self.serviceName = serviceName
         self.pairedDevices = pairedDevices
+        self.ingestBatch = { batch, key in
+            try await store.ingest(batch, idempotencyKey: key)
+        }
+    }
+
+    init(
+        store: IngestStore,
+        token: String,
+        serviceName: String,
+        ingestBatch: @escaping @Sendable (ParsedBatch, String?) async throws -> IngestResult
+    ) {
+        self.store = store
+        self.token = token
+        self.serviceName = serviceName
+        self.ingestBatch = ingestBatch
     }
 
     public var devices: [PairedDevice] {
@@ -388,7 +404,7 @@ public actor HealthReceiver {
         let batch: ParsedBatch
         do {
             batch = try BatchParser.parse(request.body)
-        } catch is BatchParseError {
+        } catch BatchParseError.connectionTest {
             record(ReceiverEvent(outcome: .connectionTest))
             return HTTPResponse(status: 200, json: ["ok": true, "test": true])
         } catch {
@@ -407,9 +423,9 @@ public actor HealthReceiver {
         noteDeviceSeen(named: deviceName)
 
         do {
-            let result = try await store.ingest(
+            let result = try await ingestBatch(
                 batch,
-                idempotencyKey: request.header("idempotency-key")
+                request.header("idempotency-key")
             )
             try? await store.noteDelivery(
                 from: deviceName,
@@ -446,18 +462,30 @@ public actor HealthReceiver {
                     "unreadable": result.unreadable
                 ]
             )
+        } catch let error as UnresolvedLegacyAliasError {
+            record(ReceiverEvent(outcome: .rejected("Legacy record needs reconciliation")))
+            return HTTPResponse(
+                status: 409,
+                json: [
+                    "error": "legacy record needs reconciliation",
+                    "detail": error.errorDescription ?? "Retry with the original record date."
+                ]
+            )
         } catch let error as IngestStorageError {
             // A full disk is not a server fault and not the phone's fault, and
             // it is the one failure a person can actually do something about.
             // 507 keeps the batch on the phone exactly as 500 would — anything
             // outside 2xx does — but it says which problem this is, and the
             // event says so in the receiver's own status.
-            record(ReceiverEvent(outcome: .rejected("Not enough disk space")))
+            record(ReceiverEvent(outcome: .rejected(
+                error.errorDescription ?? "Not enough disk space"
+            )))
             return HTTPResponse(
                 status: 507,
                 json: [
                     "error": "not enough disk space",
-                    "detail": error.errorDescription ?? "The disk is nearly full."
+                    // Disk capacity stays in local diagnostics, not the response.
+                    "detail": "Free disk space on this Mac, then retry the delivery."
                 ]
             )
         } catch {

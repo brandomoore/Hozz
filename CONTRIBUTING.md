@@ -6,8 +6,9 @@ Hozz is and does as a user, see the [README](README.md). For the exact wire
 format of every delivery, see [`docs/delivery-schema.md`](docs/delivery-schema.md);
 for the MCP tools, see [`docs/mcp.md`](docs/mcp.md).
 
-Hozz is an early-alpha project. Issues and pull requests are welcome, but
-reviews and merges may take a while.
+Hozz is preparing its first public beta. Issues and pull requests are welcome,
+but reviews and merges may take a while. Beta testers should start with the
+[testing guide](docs/beta-testing.md), preferably using synthetic data.
 
 ## Guiding principles
 
@@ -83,6 +84,25 @@ All project generation, builds, tests, installs, and launches must use the
 scripts under `tools/`. They hold the machine-wide Apple build lease before
 XcodeGen or Xcode writes shared developer resources. For an unusual direct
 command, use `tools/with-apple-build-lease.sh hozz/manual -- <command>`.
+
+Android build and tests:
+
+```bash
+cd Android
+./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest
+```
+
+The Android project needs JDK 17 or newer and an Android SDK with API 37 to
+compile; the app's minimum runtime remains Android 9/API 28. Run
+`connectedDebugAndroidTest` with an emulator or device to exercise the SQLite
+idempotency test on a dedicated test emulator, not a phone containing personal
+Health Connect data. A debug APK is not a public beta artifact.
+
+For distribution, follow the [beta release plan](docs/beta-release-plan.md),
+[Apple beta lane](docs/apple-beta.md), and
+[Android signed beta lane](docs/android-beta.md). Keep signing keys and
+credentials outside the repository. A successful build is not an App Store,
+TestFlight, or Google Play approval.
 
 The XCTest suite runs over a thousand tests covering anchors, transaction
 boundaries, cancellation, retries, tombstones, deterministic encoding, the
@@ -247,11 +267,14 @@ Turning clinical records on takes two deliberate steps:
 Both build configurations are tested, and a test asserts the flag actually
 reaches the framework it gates. The build flag and the entitlement are separate
 switches, so a build with one and not the other is a crash rather than a disabled
-feature, and that gate is what makes the mismatch harmless. Clinical records are
-read with `HKSampleQuery`, not the anchored drain, because HealthKit does not
-support anchored queries for clinical types. There is no cursor: every record is
-read every time, and the stable identity makes a re-read byte-identical to what a
-receiver already holds.
+feature.
+
+The reader remains a development spike, not supported export coverage.
+HealthKit does not support anchored queries for clinical types, so it must use a
+full snapshot. Hozz does not yet persist and reconcile those snapshots, which
+means it cannot emit a stable tombstone when a clinical record disappears.
+Until that exists, clinical records must not be enabled for release or described
+as a complete/lossless Hozz archive source.
 
 Three things about the data itself:
 
