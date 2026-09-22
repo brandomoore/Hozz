@@ -1,10 +1,14 @@
 # First public beta
 
 The first release is a beta for real testers, not a claim that every platform
-or health-data type is complete. The release candidate combines the reviewed
-Android/archive work with the Apple build interlock on the existing feature
-branch. Preparing it does not merge `main`, upload a store build, or make a
-download available.
+or health-data type is complete. It combines the reviewed Android/archive work
+with the Apple build interlock.
+
+**Published:** signed Android APK and notarized Mac DMG/ZIP in
+[beta 1](https://github.com/brandomoore/Hozz/releases/tag/v0.1.0-beta.1).
+**Approved for external testing:** iPhone/iPad 0.1.0 (1) through
+[TestFlight](https://testflight.apple.com/join/y7K4DAdF). The gates below remain
+the checklist for subsequent candidates; a local build alone is not a release.
 
 ## Release gates
 

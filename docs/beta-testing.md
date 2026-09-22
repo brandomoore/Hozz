@@ -6,18 +6,18 @@ not be used to make treatment decisions.
 
 ## Get a build
 
-Use only links in the repository's
-[GitHub releases](https://github.com/brandomoore/Hozz/releases) or an official
-TestFlight invitation linked there. If a platform has no download or invitation,
-its beta is not available yet. An archive that built locally is not an approved
-TestFlight release.
+The public beta is available through the links below and the repository's
+[GitHub release](https://github.com/brandomoore/Hozz/releases/tag/v0.1.0-beta.1).
+Keep the original data and use the release's checksums when downloading.
 
-- **Android:** the preview is a signed APK, not a Google Play release. Follow
+- **Android:** [download the signed APK](https://github.com/brandomoore/Hozz/releases/download/v0.1.0-beta.1/hozz-0.1.0-beta.1-10001-signed.apk),
+  not a Google Play release. Follow
   [Android beta instructions](android-beta.md). Android cannot read Apple Health:
   export on an Apple device and choose that file on Android.
-- **iPhone/iPad:** follow the TestFlight invitation when available.
-  Requires iOS/iPadOS 17+.
-- **Mac:** download the signed, notarized **DMG**. Open it, drag **Hozz** onto
+- **iPhone/iPad:** [join the approved TestFlight beta](https://testflight.apple.com/join/y7K4DAdF).
+  Install TestFlight, accept the invitation, then install Hozz. Requires iOS/iPadOS 17+.
+- **Mac:** [download the signed, notarized DMG](https://github.com/brandomoore/Hozz/releases/download/v0.1.0-beta.1/Hozz-0.1.0-1-mac.dmg).
+  Open it, drag **Hozz** onto
   **Applications**, eject the disk image, then open Hozz from Applications.
   Requires macOS 14+. Quit an existing Hozz instance before replacing the app;
   do not delete its stored health archive. The ZIP remains an alternative.

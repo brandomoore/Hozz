@@ -130,12 +130,21 @@ against Hozz without reading the source.
 
 ## Getting started
 
-Hozz is preparing its first public beta. Download availability is listed in
-**[GitHub releases](https://github.com/brandomoore/Hozz/releases)**; a platform
-without a download or TestFlight invitation is not released yet. See the
-**[beta testing guide](docs/beta-testing.md)** for setup, known limits, and
-privacy-safe feedback, or **[CONTRIBUTING.md](CONTRIBUTING.md)** to build from
-source.
+**The public beta is available:**
+
+| Platform | Download | Requirements |
+| --- | --- | --- |
+| iPhone / iPad | [Join TestFlight](https://testflight.apple.com/join/y7K4DAdF) | iOS / iPadOS 17+ |
+| Mac | [Download DMG](https://github.com/brandomoore/Hozz/releases/download/v0.1.0-beta.1/Hozz-0.1.0-1-mac.dmg) | macOS 14+, Apple Silicon or Intel |
+| Android | [Download APK](https://github.com/brandomoore/Hozz/releases/download/v0.1.0-beta.1/hozz-0.1.0-beta.1-10001-signed.apk) | Android 9+; experimental Health Connect writes require Android 14+ |
+
+On Mac, open the signed, notarized DMG, drag **Hozz** into **Applications**,
+eject the image, then open Hozz from Applications.
+
+See the **[beta testing guide](docs/beta-testing.md)** for setup and known limits,
+and **[release notes and checksums](https://github.com/brandomoore/Hozz/releases/tag/v0.1.0-beta.1)**
+for the exact published packages. These are beta downloads, not App Store or
+Google Play releases. To build from source, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 You'll want:
 
@@ -146,7 +155,7 @@ You'll want:
 
 ### Android preview
 
-This repository also contains the **Android beta candidate** under
+This repository also contains the **Android beta** under
 [`Android/`](Android/). It can import a lossless Hozz NDJSON/ZIP archive into a
 local canonical store, show archive-only records, preview Health Connect mapping
 loss, and explicitly write the mapped subset on Android 14/API 34 or newer.
